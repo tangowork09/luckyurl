@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>LeadScout</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232dd4bf' stroke-width='1.6'/%3E%3Ccircle cx='8' cy='8' r='2.2' fill='%232dd4bf'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <header class="brand">
+        <h1>LeadScout</h1>
+        <p class="tagline">find businesses that need you</p>
+      </header>
+
+      <div id="account-bar" class="account-bar" hidden></div>
+
+      <div id="demo-banner" class="demo-banner" hidden>
+        Demo mode — fake data. Add <code>GOOGLE_MAPS_API_KEY</code> in <code>.env</code> for real scans.
+      </div>
+
+      <section class="control">
+        <label class="control-label" for="place-input">Search a place</label>
+        <div class="search-row">
+          <input id="place-input" type="text" placeholder="e.g. Indiranagar, Bengaluru" autocomplete="off" spellcheck="false" />
+          <button id="place-btn" type="button" class="btn-secondary">Go</button>
+        </div>
+        <ul id="place-results" class="place-results" hidden></ul>
+        <p class="hint">or click anywhere on the map to set the scan center</p>
+      </section>
+
+      <section class="control">
+        <div class="label-row">
+          <label class="control-label" for="radius-slider">Radius</label>
+          <span id="radius-label" class="control-value">2.0 km</span>
+        </div>
+        <input id="radius-slider" type="range" min="250" max="10000" step="250" value="2000" />
+      </section>
+
+      <section class="control">
+        <div class="label-row">
+          <span class="control-label">Categories</span>
+          <span class="cat-links">
+            <button id="cat-all" type="button" class="linklike">all</button>
+            <span class="sep">·</span>
+            <button id="cat-none" type="button" class="linklike">none</button>
+          </span>
+        </div>
+        <div id="categories" class="categories"><span class="hint">Loading categories…</span></div>
+      </section>
+
+      <section class="control row">
+        <label class="control-label" for="max-input">Max businesses</label>
+        <input id="max-input" type="number" min="1" max="2000" step="10" value="300" />
+      </section>
+
+      <section class="control row">
+        <label class="control-label" for="psi-toggle">PageSpeed audits <span class="hint-inline">slow · ~30 s/site</span></label>
+        <input id="psi-toggle" class="switch" type="checkbox" />
+      </section>
+
+      <div class="scan-actions">
+        <button id="scan-btn" class="scan-btn" type="button" disabled>Scan</button>
+        <button id="cancel-btn" class="cancel-btn" type="button" hidden>Cancel</button>
+      </div>
+      <p id="scan-hint" class="hint center">set a center point to enable scanning</p>
+
+      <div id="status" class="status" hidden></div>
+      <div id="progress" class="progress" hidden><div id="progress-fill" class="progress-fill"></div></div>
+
+      <section class="results">
+        <div id="empty-state" class="empty-state">Pick a point on the map, choose categories, hit <b>Scan</b>.</div>
+        <div id="live-feed" class="live-feed" hidden></div>
+        <div id="final-results" hidden>
+          <div class="results-head">
+            <h2>Leads <span id="lead-count" class="lead-count"></span></h2>
+            <button id="sort-btn" type="button" class="linklike" title="toggle sort direction">↓</button>
+          </div>
+          <div id="stats" class="stats"></div>
+          <div id="files" class="files"></div>
+          <div id="filters" class="filters">
+            <input id="lead-search" class="lead-search" type="search" placeholder="Search name, phone, address…" autocomplete="off" />
+            <div id="kind-filters" class="filter-chips"></div>
+            <div class="sort-row">
+              <label class="sort-by">sort by
+                <select id="sort-by">
+                  <option value="score">score</option>
+                  <option value="name">name</option>
+                  <option value="reviews">reviews</option>
+                  <option value="value">est. value</option>
+                  <option value="winnability">winnability</option>
+                </select>
+              </label>
+            </div>
+            <label class="score-filter">min score
+              <input id="min-score" type="range" min="0" max="99" step="1" value="0" />
+              <span id="min-score-val">0</span>
+            </label>
+          </div>
+          <ul id="lead-list" class="lead-list"></ul>
+        </div>
+      </section>
+
+      <section id="history-section" class="control history" hidden>
+        <div class="label-row">
+          <span class="control-label">Past scans</span>
+          <button id="history-refresh" type="button" class="linklike">refresh</button>
+        </div>
+        <ul id="history-list" class="history-list"></ul>
+      </section>
+    </aside>
+
+    <div id="map" role="application" aria-label="Map — click to set scan center"></div>
+  </div>
+
+  <div id="modal-root"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

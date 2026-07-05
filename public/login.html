@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>LeadScout — Sign in</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232dd4bf' stroke-width='1.6'/%3E%3Ccircle cx='8' cy='8' r='2.2' fill='%232dd4bf'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <form id="auth-form" class="auth-card" autocomplete="on">
+      <h1>LeadScout</h1>
+      <p class="tagline" id="auth-tagline">Sign in to find businesses that need you</p>
+
+      <div class="auth-field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
+      </div>
+      <div class="auth-field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="at least 8 characters" />
+      </div>
+
+      <button id="auth-submit" class="auth-submit" type="submit">Sign in</button>
+      <div id="auth-error" class="auth-error" hidden></div>
+
+      <div class="auth-toggle">
+        <span id="toggle-text">New here?</span>
+        <button id="toggle-btn" type="button">Create an account</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+      const $ = (id) => document.getElementById(id);
+      let mode = 'login'; // 'login' | 'register'
+
+      const form = $('auth-form');
+      const errEl = $('auth-error');
+      const submitBtn = $('auth-submit');
+
+      function setMode(next) {
+        mode = next;
+        const login = mode === 'login';
+        $('auth-tagline').textContent = login
+          ? 'Sign in to find businesses that need you'
+          : 'Create an account to start scanning';
+        submitBtn.textContent = login ? 'Sign in' : 'Create account';
+        $('toggle-text').textContent = login ? 'New here?' : 'Already have an account?';
+        $('toggle-btn').textContent = login ? 'Create an account' : 'Sign in';
+        $('password').autocomplete = login ? 'current-password' : 'new-password';
+        errEl.hidden = true;
+      }
+
+      $('toggle-btn').addEventListener('click', () => setMode(mode === 'login' ? 'register' : 'login'));
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        errEl.hidden = true;
+        const email = $('email').value.trim();
+        const password = $('password').value;
+        if (mode === 'register' && password.length < 8) {
+          errEl.textContent = 'Password must be at least 8 characters.';
+          errEl.hidden = false;
+          return;
+        }
+        submitBtn.disabled = true;
+        try {
+          const res = await fetch(`/api/auth/${mode}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Failed (HTTP ${res.status}).`);
+          location.href = '/';
+        } catch (err) {
+          errEl.textContent = err.message || 'Something went wrong.';
+          errEl.hidden = false;
+        } finally {
+          submitBtn.disabled = false;
+        }
+      });
+
+      // If already signed in, skip straight to the app.
+      fetch('/api/auth/me').then((r) => { if (r.ok) location.href = '/'; }).catch(() => {});
+    })();
+  </script>
+</body>
+</html>

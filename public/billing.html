@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>LeadScout — Payment</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232dd4bf' stroke-width='1.6'/%3E%3Ccircle cx='8' cy='8' r='2.2' fill='%232dd4bf'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h1>LeadScout</h1>
+      <p class="tagline" id="title">Confirming your payment…</p>
+      <div id="msg" class="admin-note">Please wait while we verify your order.</div>
+      <p style="margin-top:22px"><a href="/">← Back to LeadScout</a></p>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+      const params = new URLSearchParams(location.search);
+      const orderId = params.get('order_id');
+      const title = document.getElementById('title');
+      const msg = document.getElementById('msg');
+
+      if (!orderId) {
+        title.textContent = 'Missing order';
+        msg.textContent = 'No order reference was provided.';
+        return;
+      }
+
+      let tries = 0;
+      async function check() {
+        tries++;
+        try {
+          const res = await fetch(`/api/billing/order/${encodeURIComponent(orderId)}`);
+          if (res.status === 401) { location.href = '/login.html'; return; }
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.status === 'PAID') {
+            title.textContent = 'Payment successful ✓';
+            msg.textContent = 'Your plan is now active. Redirecting…';
+            setTimeout(() => (location.href = '/'), 1600);
+            return;
+          }
+          if (res.ok && (data.status === 'ACTIVE' || data.status === 'pending') && tries < 8) {
+            setTimeout(check, 2000); // webhook may still be in flight
+            return;
+          }
+          if (res.ok && data.status === 'PAID') return;
+          if (tries < 8 && res.ok) { setTimeout(check, 2000); return; }
+          title.textContent = 'Payment not confirmed';
+          msg.textContent = data.error || `Order status: ${data.status || 'unknown'}. If you were charged, it will activate shortly.`;
+        } catch (err) {
+          if (tries < 8) { setTimeout(check, 2000); return; }
+          title.textContent = 'Could not verify';
+          msg.textContent = err.message || 'Please refresh in a moment.';
+        }
+      }
+      check();
+    })();
+  </script>
+</body>
+</html>

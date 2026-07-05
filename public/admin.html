@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>LeadScout — Admin</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232dd4bf' stroke-width='1.6'/%3E%3Ccircle cx='8' cy='8' r='2.2' fill='%232dd4bf'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="admin-page">
+    <div class="admin-topbar">
+      <h1>LeadScout Admin</h1>
+      <span class="acct-spacer"></span>
+      <a href="/" class="admin-btn">← Dashboard</a>
+      <button id="logout" class="admin-btn">Log out</button>
+    </div>
+    <div id="gate" class="admin-note">Checking access…</div>
+
+    <div id="content" hidden>
+      <h2>Users</h2>
+      <div class="admin-scroll">
+        <table class="admin-table" id="users-table">
+          <thead>
+            <tr><th>Email</th><th>Role</th><th>Plan</th><th>Scans</th><th>Status</th><th>Expires</th><th>Grant plan</th></tr>
+          </thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+
+      <h2>Plans</h2>
+      <div class="admin-scroll">
+        <table class="admin-table" id="plans-table">
+          <thead>
+            <tr><th>ID</th><th>Name</th><th>₹/period</th><th>Days</th><th>Scans</th><th>Radius (m)</th><th>Max biz</th><th>PSI</th><th>Active</th></tr>
+          </thead>
+          <tbody id="plans-body"></tbody>
+        </table>
+      </div>
+
+      <h2>Create / update a plan</h2>
+      <form id="plan-form" class="admin-form">
+        <input name="id" placeholder="id (e.g. pro)" required />
+        <input name="name" placeholder="Name" required />
+        <input name="priceINR" type="number" min="0" placeholder="₹ price" style="width:90px" />
+        <input name="periodDays" type="number" min="1" value="30" placeholder="days" style="width:70px" />
+        <input name="scansPerPeriod" type="number" min="0" placeholder="scans" style="width:80px" />
+        <input name="maxRadiusMeters" type="number" min="100" placeholder="radius m" style="width:90px" />
+        <input name="maxBusinesses" type="number" min="1" placeholder="max biz" style="width:80px" />
+        <label style="font-size:13px;color:var(--muted)"><input type="checkbox" name="psiAllowed" /> PSI</label>
+        <label style="font-size:13px;color:var(--muted)"><input type="checkbox" name="active" checked /> Active</label>
+        <button type="submit">Save plan</button>
+      </form>
+      <div id="plan-msg" class="admin-note"></div>
+
+      <h2>Orders</h2>
+      <div class="admin-scroll">
+        <table class="admin-table" id="orders-table">
+          <thead>
+            <tr><th>Order</th><th>User</th><th>Plan</th><th>₹</th><th>Status</th><th>Created</th></tr>
+          </thead>
+          <tbody id="orders-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
