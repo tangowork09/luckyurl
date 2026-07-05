@@ -80,13 +80,13 @@ const CONTENT_SECURITY_POLICY = [
   "base-uri 'self'",
   "object-src 'none'",
   "frame-ancestors 'none'",
-  "form-action 'self'",
-  "script-src 'self' 'unsafe-inline' https://unpkg.com https://sdk.cashfree.com https://cdnjs.cloudflare.com",
+  "form-action 'self' https://*.cashfree.com",
+  "script-src 'self' 'unsafe-inline' https://unpkg.com https://*.cashfree.com https://cdnjs.cloudflare.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: https:", // map tiles (CARTO/OSM), business favicons, PSI screenshots
-  "connect-src 'self' https://nominatim.openstreetmap.org https://sandbox.cashfree.com https://api.cashfree.com",
-  'frame-src https://sdk.cashfree.com', // Cashfree checkout modal
+  "connect-src 'self' https://nominatim.openstreetmap.org https://*.cashfree.com",
+  'frame-src https://*.cashfree.com', // Cashfree checkout modal spans sdk/payments/sandbox subdomains
 ].join('; ');
 
 // Hand-rolled security headers on every response (no helmet dependency).
