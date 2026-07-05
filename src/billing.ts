@@ -236,6 +236,14 @@ export class BillingService {
     await this.plans.load();
     if (this.plans.all().length === 0) {
       for (const p of SEED_PLANS) await this.plans.put(p);
+      return;
+    }
+    // Migrate default plans persisted under an older schema (no `pricing` map /
+    // no lifetime tier). A stored default plan that already has `pricing` was
+    // saved under the current schema (possibly admin-edited) and is left alone.
+    for (const seed of SEED_PLANS) {
+      const existing = this.plans.get(seed.id);
+      if (!existing || !existing.pricing) await this.plans.put(seed);
     }
   }
 
