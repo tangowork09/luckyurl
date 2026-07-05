@@ -20,6 +20,18 @@ export interface User {
   createdAt: string;
   /** Optional contact phone (used for Cashfree customer_details when present). */
   phone?: string;
+  /**
+   * Whether the email has been confirmed. Defaults to true today so the
+   * no-verify UX is unchanged; enforcement is gated behind
+   * REQUIRE_EMAIL_VERIFICATION (off). See TODO(email-verification) in server.ts.
+   */
+  emailVerified: boolean;
+  /**
+   * Session-revocation counter embedded in the signed cookie. Bumped on logout
+   * and password change so old cookies stop validating (see auth.ts). Older
+   * records without this field are treated as version 0.
+   */
+  tokenVersion: number;
 }
 
 const SCRYPT_KEYLEN = 64;
@@ -97,9 +109,34 @@ export class UserStore {
       role: input.role ?? 'user',
       createdAt: new Date().toISOString(),
       phone: input.phone,
+      // Default verified so the current no-verify signup flow is unchanged.
+      emailVerified: true,
+      tokenVersion: 0,
     };
     await this.store.put(user);
     return user;
+  }
+
+  /**
+   * Change a user's password and bump tokenVersion (invalidating every other
+   * session). Returns the updated user, or undefined if the id is unknown.
+   */
+  async updatePassword(id: string, newPassword: string): Promise<User | undefined> {
+    const u = await this.byId(id);
+    if (!u) return undefined;
+    const { hash, salt } = await hashPassword(newPassword);
+    const updated: User = { ...u, passwordHash: hash, salt, tokenVersion: (u.tokenVersion ?? 0) + 1 };
+    await this.store.put(updated);
+    return updated;
+  }
+
+  /** Bump tokenVersion to revoke all outstanding sessions (e.g. on logout). */
+  async bumpTokenVersion(id: string): Promise<User | undefined> {
+    const u = await this.byId(id);
+    if (!u) return undefined;
+    const updated: User = { ...u, tokenVersion: (u.tokenVersion ?? 0) + 1 };
+    await this.store.put(updated);
+    return updated;
   }
 
   /** Public projection safe to send to the client. */

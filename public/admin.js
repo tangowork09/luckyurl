@@ -32,7 +32,7 @@
           `<td>${esc(u.email)}</td>` +
           `<td>${esc(u.role)}</td>` +
           `<td>${esc(u.planName)}</td>` +
-          `<td>${esc(u.scansUsed)}/${esc(u.scansPerPeriod)}</td>` +
+          `<td>${u.unlimited ? '∞' : `${esc(u.scansUsed)}/${esc(u.scansPerPeriod)}`}</td>` +
           `<td>${esc(u.status)}</td>` +
           `<td>${esc(fmtDate(u.expiresAt))}</td>` +
           `<td>` +
@@ -46,16 +46,29 @@
       .join('');
   }
 
+  function pricingSummary(p) {
+    const bits = [];
+    const pr = p.pricing || {};
+    if (pr.monthly) bits.push(`₹${pr.monthly.price}/mo`);
+    if (pr.yearly) bits.push(`₹${pr.yearly.price}/yr`);
+    if (pr.lifetime) bits.push(`₹${pr.lifetime.price} one-time`);
+    return bits.length ? bits.join(', ') : 'free';
+  }
+
   async function loadPlans() {
     plans = await api('/api/admin/plans');
     $('plans-body').innerHTML = plans
       .map(
         (p) =>
           `<tr>` +
-          `<td>${esc(p.id)}</td><td>${esc(p.name)}</td><td>${esc(p.priceINR)}</td>` +
-          `<td>${esc(p.periodDays)}</td><td>${esc(p.scansPerPeriod)}</td>` +
+          `<td>${esc(p.id)}</td><td>${esc(p.name)}${p.badge ? ` <span class="admin-note">(${esc(p.badge)})</span>` : ''}</td>` +
+          `<td>${esc(p.tier)}</td>` +
+          `<td>${p.scansPerPeriod >= 100000 ? '∞' : esc(p.scansPerPeriod)}</td>` +
           `<td>${esc(p.maxRadiusMeters)}</td><td>${esc(p.maxBusinesses)}</td>` +
-          `<td>${p.psiAllowed ? '✓' : '—'}</td><td>${p.active ? '✓' : '—'}</td>` +
+          `<td>${p.psiAllowed ? '✓' : '—'}</td><td>${esc(p.aiFeatures)}</td>` +
+          `<td>${p.prioritySupport ? '✓' : '—'}</td>` +
+          `<td>${esc(pricingSummary(p))}</td>` +
+          `<td>${p.active ? '✓' : '—'}</td>` +
           `</tr>`,
       )
       .join('');
@@ -105,12 +118,20 @@
     const body = {
       id: f.id.value.trim(),
       name: f.name.value.trim(),
-      priceINR: Number(f.priceINR.value) || 0,
-      periodDays: Number(f.periodDays.value) || 30,
+      tier: Number(f.tier.value) || 0,
       scansPerPeriod: Number(f.scansPerPeriod.value) || 0,
       maxRadiusMeters: Number(f.maxRadiusMeters.value) || 1500,
       maxBusinesses: Number(f.maxBusinesses.value) || 50,
       psiAllowed: f.psiAllowed.checked,
+      aiFeatures: f.aiFeatures.value,
+      prioritySupport: f.prioritySupport.checked,
+      badge: f.badge.value || undefined,
+      monthlyPrice: Number(f.monthlyPrice.value) || 0,
+      monthlyMrp: Number(f.monthlyMrp.value) || 0,
+      yearlyPrice: Number(f.yearlyPrice.value) || 0,
+      yearlyMrp: Number(f.yearlyMrp.value) || 0,
+      lifetimePrice: Number(f.lifetimePrice.value) || 0,
+      lifetimeMrp: Number(f.lifetimeMrp.value) || 0,
       active: f.active.checked,
     };
     try {

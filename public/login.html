@@ -2,33 +2,57 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="dark" />
-  <title>LeadScout — Sign in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#04070c" />
+  <title>leadsfinder.ai — Sign in</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232dd4bf' stroke-width='1.6'/%3E%3Ccircle cx='8' cy='8' r='2.2' fill='%232dd4bf'/%3E%3C/svg%3E" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('lf-theme');
+        if (t !== 'light' && t !== 'dark') t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,600&family=Manrope:wght@400;500;600;700;800&display=swap" />
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="auth-body">
+  <div class="auth-bg" aria-hidden="true">
+    <span class="orb-a"></span>
+    <span class="orb-b"></span>
+  </div>
+
   <div class="auth-wrap">
-    <form id="auth-form" class="auth-card" autocomplete="on">
-      <h1>LeadScout</h1>
-      <p class="tagline" id="auth-tagline">Sign in to find businesses that need you</p>
+    <form id="auth-form" class="auth-card glass glass-specular glass-refract" autocomplete="on">
+      <span class="refract-edge"></span>
+      <div class="auth-inner">
+        <div class="auth-brand">
+          <span class="mark" aria-hidden="true"></span>
+          <span class="word">leadsfinder<span class="ai">.ai</span></span>
+        </div>
+        <p class="tagline" id="auth-tagline">Sign in to find businesses that need you</p>
 
-      <div class="auth-field">
-        <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
-      </div>
-      <div class="auth-field">
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="at least 8 characters" />
-      </div>
+        <div class="auth-field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
+        </div>
+        <div class="auth-field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="at least 8 characters" />
+        </div>
 
-      <button id="auth-submit" class="auth-submit" type="submit">Sign in</button>
-      <div id="auth-error" class="auth-error" hidden></div>
+        <button id="auth-submit" class="auth-submit" type="submit">Sign in</button>
+        <div id="auth-error" class="auth-error" hidden></div>
 
-      <div class="auth-toggle">
-        <span id="toggle-text">New here?</span>
-        <button id="toggle-btn" type="button">Create an account</button>
+        <div class="auth-toggle">
+          <span id="toggle-text">New here?</span>
+          <button id="toggle-btn" type="button">Create an account</button>
+        </div>
       </div>
     </form>
   </div>
@@ -85,6 +109,18 @@
           submitBtn.disabled = false;
         }
       });
+
+      // Pointer-reactive specular on the auth card (skipped under reduced motion).
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        const card = form;
+        let queued = false, px = 0, py = 0;
+        const paint = () => { queued = false; card.style.setProperty('--mx', px + 'px'); card.style.setProperty('--my', py + 'px'); };
+        card.addEventListener('pointermove', (e) => {
+          const r = card.getBoundingClientRect();
+          px = e.clientX - r.left; py = e.clientY - r.top;
+          if (!queued) { queued = true; requestAnimationFrame(paint); }
+        });
+      }
 
       // If already signed in, skip straight to the app.
       fetch('/api/auth/me').then((r) => { if (r.ok) location.href = '/'; }).catch(() => {});

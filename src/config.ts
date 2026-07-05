@@ -76,6 +76,22 @@ export function loadConfig(): AppConfig {
   const cashfreeEnv: AppConfig['cashfreeEnv'] = get('CASHFREE_ENV') === 'production' ? 'production' : 'sandbox';
   const cashfreeSecretKey = get('CASHFREE_SECRET_KEY');
 
+  // Webhook secret falls back to the API secret key (Cashfree signs with it when
+  // no dedicated webhook secret is configured). Don't hard-require it — but warn
+  // in production so the fallback is visible in logs.
+  const cashfreeWebhookSecretEnv = get('CASHFREE_WEBHOOK_SECRET');
+  const cashfreeWebhookSecret = cashfreeWebhookSecretEnv ?? cashfreeSecretKey;
+  if (!cashfreeWebhookSecretEnv && cashfreeSecretKey && isProd) {
+    console.warn(
+      'CASHFREE_WEBHOOK_SECRET not set — falling back to CASHFREE_SECRET_KEY for webhook verification. Set a dedicated webhook secret.',
+    );
+  }
+
+  // Email verification: scaffolded only. RESEND_API_KEY + REQUIRE_EMAIL_VERIFICATION
+  // are read here so turning verification on later is a one-flag change; nothing
+  // enforces them yet (see TODO(email-verification) in server.ts).
+  const requireEmailVerification = /^(1|true|yes)$/i.test(get('REQUIRE_EMAIL_VERIFICATION') ?? '');
+
   return {
     googleApiKey,
     pagespeedKey,
@@ -94,9 +110,10 @@ export function loadConfig(): AppConfig {
     cashfreeAppId: get('CASHFREE_APP_ID'),
     cashfreeSecretKey,
     cashfreeEnv,
-    // Cashfree signs webhooks with the secret key, so default to it.
-    cashfreeWebhookSecret: get('CASHFREE_WEBHOOK_SECRET') ?? cashfreeSecretKey,
+    cashfreeWebhookSecret,
     cashfreeBaseUrl: cashfreeBaseUrl(cashfreeEnv),
+    resendApiKey: get('RESEND_API_KEY'),
+    requireEmailVerification,
   };
 }
 

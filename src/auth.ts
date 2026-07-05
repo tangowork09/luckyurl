@@ -26,6 +26,8 @@ export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 export interface SessionPayload {
   uid: string;
   exp: number; // epoch ms
+  /** tokenVersion at issue time; must equal the user's current one (revocation). */
+  tv?: number;
 }
 
 const b64url = (input: Buffer | string): string => Buffer.from(input).toString('base64url');
@@ -53,6 +55,7 @@ export function verifySession(token: string, secret: string): SessionPayload | n
   }
   if (typeof payload.uid !== 'string' || typeof payload.exp !== 'number') return null;
   if (payload.exp < Date.now()) return null;
+  if (payload.tv !== undefined && typeof payload.tv !== 'number') return null;
   return payload;
 }
 
@@ -123,6 +126,39 @@ export function resetRateLimits(): void {
   attempts.clear();
 }
 
+/*
+ * Named limiter policies. Registration and login are each guarded by TWO
+ * independent counters — one keyed by IP alone and one by email — and BOTH must
+ * allow. The IP-alone counter is what blunts mass signups / credential stuffing
+ * where an attacker rotates the email to keep any per-email counter at 1.
+ */
+export const RATE_LIMIT_POLICY = {
+  /** Registrations per IP (email-independent). Blocks mass signups. */
+  registerPerIp: { max: 5, windowMs: 60 * 60 * 1000 },
+  /** Registrations per email (retries for one address). */
+  registerPerEmail: { max: 10, windowMs: 15 * 60 * 1000 },
+  /** Login attempts per email (classic brute-force guard). */
+  loginPerEmail: { max: 10, windowMs: 15 * 60 * 1000 },
+  /** Login attempts per IP (email-independent). Blunts credential stuffing. */
+  loginPerIp: { max: 30, windowMs: 15 * 60 * 1000 },
+} as const;
+
+/** Registration limiter: per-IP AND per-email must both allow (both counted). */
+export function registerRateLimitAllow(ip: string, email: string): boolean {
+  const p = RATE_LIMIT_POLICY;
+  const ipOk = rateLimitAllow(`register:ip:${ip}`, p.registerPerIp.max, p.registerPerIp.windowMs);
+  const emailOk = rateLimitAllow(`register:email:${email.toLowerCase()}`, p.registerPerEmail.max, p.registerPerEmail.windowMs);
+  return ipOk && emailOk;
+}
+
+/** Login limiter: per-IP AND per-email must both allow (both counted). */
+export function loginRateLimitAllow(ip: string, email: string): boolean {
+  const p = RATE_LIMIT_POLICY;
+  const ipOk = rateLimitAllow(`login:ip:${ip}`, p.loginPerIp.max, p.loginPerIp.windowMs);
+  const emailOk = rateLimitAllow(`login:email:${email.toLowerCase()}`, p.loginPerEmail.max, p.loginPerEmail.windowMs);
+  return ipOk && emailOk;
+}
+
 /* ------------------------------ middleware ------------------------------ */
 
 export interface AuthDeps {
@@ -137,6 +173,10 @@ export async function loadUserFromRequest(req: Request, deps: AuthDeps): Promise
   const payload = verifySession(token, deps.sessionSecret);
   if (!payload) return undefined;
   const user = await deps.users.byId(payload.uid);
+  if (!user) return undefined;
+  // Session revocation: the cookie's tokenVersion must match the user's current
+  // one. A logout / password-change bumps it, invalidating older cookies.
+  if ((user.tokenVersion ?? 0) !== (payload.tv ?? 0)) return undefined;
   req.user = user;
   return user;
 }

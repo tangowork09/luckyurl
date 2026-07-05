@@ -3,15 +3,29 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="dark" />
-  <title>LeadScout — Admin</title>
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#04070c" />
+  <title>leadsfinder.ai — Admin</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232dd4bf' stroke-width='1.6'/%3E%3Ccircle cx='8' cy='8' r='2.2' fill='%232dd4bf'/%3E%3C/svg%3E" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('lf-theme');
+        if (t !== 'light' && t !== 'dark') t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,600&family=Manrope:wght@400;500;600;700;800&display=swap" />
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="admin-body">
+  <div class="admin-bg" aria-hidden="true"></div>
   <div class="admin-page">
-    <div class="admin-topbar">
-      <h1>LeadScout Admin</h1>
+    <div class="admin-topbar glass">
+      <h1><span class="mark" aria-hidden="true"></span>leadsfinder<span style="color:var(--accent);font-style:italic">.ai</span>&nbsp;Admin</h1>
       <span class="acct-spacer"></span>
       <a href="/" class="admin-btn">← Dashboard</a>
       <button id="logout" class="admin-btn">Log out</button>
@@ -19,49 +33,77 @@
     <div id="gate" class="admin-note">Checking access…</div>
 
     <div id="content" hidden>
-      <h2>Users</h2>
-      <div class="admin-scroll">
-        <table class="admin-table" id="users-table">
-          <thead>
-            <tr><th>Email</th><th>Role</th><th>Plan</th><th>Scans</th><th>Status</th><th>Expires</th><th>Grant plan</th></tr>
-          </thead>
-          <tbody id="users-body"></tbody>
-        </table>
+      <div class="admin-section glass">
+        <h2>Users</h2>
+        <div class="admin-scroll">
+          <table class="admin-table" id="users-table">
+            <thead>
+              <tr><th>Email</th><th>Role</th><th>Plan</th><th>Scans</th><th>Status</th><th>Expires</th><th>Grant plan</th></tr>
+            </thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
       </div>
 
-      <h2>Plans</h2>
-      <div class="admin-scroll">
-        <table class="admin-table" id="plans-table">
-          <thead>
-            <tr><th>ID</th><th>Name</th><th>₹/period</th><th>Days</th><th>Scans</th><th>Radius (m)</th><th>Max biz</th><th>PSI</th><th>Active</th></tr>
-          </thead>
-          <tbody id="plans-body"></tbody>
-        </table>
+      <div class="admin-section glass">
+        <h2>Plans</h2>
+        <div class="admin-scroll">
+          <table class="admin-table" id="plans-table">
+            <thead>
+              <tr><th>ID</th><th>Name</th><th>Tier</th><th>Scans</th><th>Radius (m)</th><th>Max biz</th><th>PSI</th><th>AI</th><th>Priority</th><th>Pricing</th><th>Active</th></tr>
+            </thead>
+            <tbody id="plans-body"></tbody>
+          </table>
+        </div>
       </div>
 
-      <h2>Create / update a plan</h2>
-      <form id="plan-form" class="admin-form">
-        <input name="id" placeholder="id (e.g. pro)" required />
-        <input name="name" placeholder="Name" required />
-        <input name="priceINR" type="number" min="0" placeholder="₹ price" style="width:90px" />
-        <input name="periodDays" type="number" min="1" value="30" placeholder="days" style="width:70px" />
-        <input name="scansPerPeriod" type="number" min="0" placeholder="scans" style="width:80px" />
-        <input name="maxRadiusMeters" type="number" min="100" placeholder="radius m" style="width:90px" />
-        <input name="maxBusinesses" type="number" min="1" placeholder="max biz" style="width:80px" />
-        <label style="font-size:13px;color:var(--muted)"><input type="checkbox" name="psiAllowed" /> PSI</label>
-        <label style="font-size:13px;color:var(--muted)"><input type="checkbox" name="active" checked /> Active</label>
-        <button type="submit">Save plan</button>
-      </form>
-      <div id="plan-msg" class="admin-note"></div>
+      <div class="admin-section glass">
+        <h2>Create / update a plan</h2>
+        <form id="plan-form" class="admin-form">
+          <input name="id" placeholder="id (e.g. pro)" required />
+          <input name="name" placeholder="Name" required />
+          <input name="tier" type="number" min="0" value="1" placeholder="tier" style="width:60px" title="rank: free 0, starter 1, pro 2, lifetime 3" />
+          <input name="scansPerPeriod" type="number" min="0" placeholder="scans" style="width:80px" />
+          <input name="maxRadiusMeters" type="number" min="100" placeholder="radius m" style="width:90px" />
+          <input name="maxBusinesses" type="number" min="1" placeholder="max biz" style="width:80px" />
+          <label>AI
+            <select name="aiFeatures" style="margin-left:4px">
+              <option value="none">none</option>
+              <option value="basic">basic</option>
+              <option value="full">full</option>
+            </select>
+          </label>
+          <label><input type="checkbox" name="psiAllowed" /> PSI</label>
+          <label><input type="checkbox" name="prioritySupport" /> Priority</label>
+          <label>Badge
+            <select name="badge" style="margin-left:4px">
+              <option value="">none</option>
+              <option value="popular">popular</option>
+              <option value="best-value">best-value</option>
+            </select>
+          </label>
+          <input name="monthlyPrice" type="number" min="0" placeholder="₹/mo" style="width:70px" title="monthly price (0 = no monthly cycle)" />
+          <input name="monthlyMrp" type="number" min="0" placeholder="mo MRP" style="width:70px" />
+          <input name="yearlyPrice" type="number" min="0" placeholder="₹/yr" style="width:70px" title="yearly price (0 = no yearly cycle)" />
+          <input name="yearlyMrp" type="number" min="0" placeholder="yr MRP" style="width:70px" />
+          <input name="lifetimePrice" type="number" min="0" placeholder="₹ life" style="width:70px" title="one-time lifetime price (0 = not a lifetime plan)" />
+          <input name="lifetimeMrp" type="number" min="0" placeholder="life MRP" style="width:70px" />
+          <label><input type="checkbox" name="active" checked /> Active</label>
+          <button type="submit">Save plan</button>
+        </form>
+        <div id="plan-msg" class="admin-note"></div>
+      </div>
 
-      <h2>Orders</h2>
-      <div class="admin-scroll">
-        <table class="admin-table" id="orders-table">
-          <thead>
-            <tr><th>Order</th><th>User</th><th>Plan</th><th>₹</th><th>Status</th><th>Created</th></tr>
-          </thead>
-          <tbody id="orders-body"></tbody>
-        </table>
+      <div class="admin-section glass">
+        <h2>Orders</h2>
+        <div class="admin-scroll">
+          <table class="admin-table" id="orders-table">
+            <thead>
+              <tr><th>Order</th><th>User</th><th>Plan</th><th>₹</th><th>Status</th><th>Created</th></tr>
+            </thead>
+            <tbody id="orders-body"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>

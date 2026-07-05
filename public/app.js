@@ -33,11 +33,22 @@
     'needs-improvement': '#facc15',
   };
 
+  // Signature score visualization: a luminous SVG ring, color-graded by score.
+  // The number is still rendered (and announced) for accessibility.
+  const RING_R = 15.5;
+  const RING_C = 2 * Math.PI * RING_R; // circumference
   function scoreChipHtml(score) {
     const s = clamp(Math.round(Number(score) || 0), 0, 100);
-    const bg = `hsla(172, 75%, 45%, ${(0.07 + (s / 100) * 0.3).toFixed(3)})`;
-    const fg = `hsl(172, 80%, ${Math.round(45 + (s / 100) * 30)}%)`;
-    return `<span class="score-chip" style="background:${bg};color:${fg}">${s}</span>`;
+    const grade = s >= 70 ? 'high' : s >= 40 ? 'mid' : 'low';
+    const offset = (RING_C * (1 - s / 100)).toFixed(2);
+    return (
+      `<span class="score-ring grade-${grade}" role="img" aria-label="Lead score ${s} of 100">` +
+      `<svg viewBox="0 0 40 40" aria-hidden="true">` +
+      `<circle class="ring-track" cx="20" cy="20" r="${RING_R}"></circle>` +
+      `<circle class="ring-fill" cx="20" cy="20" r="${RING_R}" ` +
+      `stroke-dasharray="${RING_C.toFixed(2)}" stroke-dashoffset="${offset}"></circle>` +
+      `</svg><span class="score-num">${s}</span></span>`
+    );
   }
 
   const kindBadgeHtml = (kind) =>
@@ -72,10 +83,22 @@
 
   const WINNABILITY_RANK = { easy: 0, medium: 1, hard: 2 };
 
+  // ---------------------------------------------------------------- theme
+  const THEME_KEY = 'lf-theme';
+  const TILE_URL = {
+    dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    light: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+  };
+  const currentTheme = () => document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+
   // ---------------------------------------------------------------- map
   const FALLBACK_CENTER = { lat: 12.9758, lng: 77.6045 };
-  const map = L.map('map').setView([FALLBACK_CENTER.lat, FALLBACK_CENTER.lng], 13);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  const map = L.map('map', { zoomControl: false }).setView(
+    [FALLBACK_CENTER.lat, FALLBACK_CENTER.lng],
+    13,
+  );
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+  const tileLayer = L.tileLayer(TILE_URL[currentTheme()], {
     attribution: '&copy; OpenStreetMap &copy; CARTO',
     subdomains: 'abcd',
     maxZoom: 20,
@@ -738,31 +761,82 @@
   updateScanButton();
 
   // ---------------------------------------------------------------- history browser
+  // History retention is plan-gated. Prefer the server's historyDays when the
+  // backend surfaces it; otherwise derive from tier (free 0 / starter 2 / pro+ full).
+  function historyDaysFor(plan) {
+    if (!plan) return 0;
+    if (typeof plan.historyDays === 'number') return plan.historyDays;
+    const tier = Number(plan.tier) || 0;
+    return tier === 0 ? 0 : tier === 1 ? 2 : 3650; // pro/lifetime → effectively full
+  }
+
+  function retentionLabel(days) {
+    if (days <= 0) return 'Not available on the free plan';
+    if (days >= 365) return 'Full history retained';
+    return days === 1 ? 'Last 24 hours' : `Last ${days} days`;
+  }
+
+  function renderHistoryLocked() {
+    const body = $('history-body');
+    body.innerHTML =
+      `<div class="history-locked">` +
+      `<div class="lock-badge" aria-hidden="true">🔒</div>` +
+      `<h4>Keep every scan</h4>` +
+      `<p>Scan history is a paid feature. Upgrade to save your leads and revisit past scans anytime.</p>` +
+      `<button type="button" class="upgrade-cta" id="history-upgrade">Upgrade to unlock</button>` +
+      `</div>`;
+    const up = $('history-upgrade');
+    if (up) up.addEventListener('click', () => openBillingModal());
+  }
+
   function loadHistory() {
+    const section = $('history-section');
+    const retentionEl = $('history-retention');
+    const body = $('history-body');
+    // Wait until we know the plan; boot() calls loadHistory after refreshMe.
+    const days = historyDaysFor(state.me?.plan);
+    section.hidden = false;
+    retentionEl.textContent = retentionLabel(days);
+
+    if (days <= 0) {
+      renderHistoryLocked();
+      return;
+    }
+
     fetch('/api/leads')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((scans) => {
-        const list = $('history-list');
-        const section = $('history-section');
-        if (!Array.isArray(scans) || scans.length === 0) {
-          section.hidden = true;
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((data) => {
+        // API returns { scans, historyDays, retentionLocked }; tolerate a bare
+        // array from older builds.
+        const scans = Array.isArray(data) ? data : data.scans || [];
+        if (data && data.retentionLocked) {
+          renderHistoryLocked();
           return;
         }
-        section.hidden = false;
-        list.innerHTML = scans
-          .slice(0, 20)
-          .map((s) => {
-            const count = typeof s.leadCount === 'number' ? `${s.leadCount} leads` : `${s.files.length} files`;
-            return `<li><button type="button" class="history-item" data-dir="${esc(s.dir)}">${esc(s.dir)}</button><span class="history-count">${esc(count)}</span></li>`;
-          })
-          .join('');
+        if (typeof data?.historyDays === 'number') {
+          retentionEl.textContent = retentionLabel(data.historyDays);
+        }
+        if (!Array.isArray(scans) || scans.length === 0) {
+          body.innerHTML = `<p class="history-empty">No scans yet — run your first scan above.</p>`;
+          return;
+        }
+        body.innerHTML =
+          `<ul id="history-list" class="history-list">` +
+          scans
+            .slice(0, 20)
+            .map((s) => {
+              const count = typeof s.leadCount === 'number' ? `${s.leadCount} leads` : `${(s.files || []).length} files`;
+              return `<li><button type="button" class="history-item" data-dir="${esc(s.dir)}">${esc(s.dir)}</button><span class="history-count">${esc(count)}</span></li>`;
+            })
+            .join('') +
+          `</ul>`;
       })
       .catch(() => {
-        /* history is optional */
+        body.innerHTML = `<p class="history-empty">Could not load history.</p>`;
       });
   }
 
-  $('history-list').addEventListener('click', (e) => {
+  $('history-body').addEventListener('click', (e) => {
     const btn = e.target.closest('.history-item');
     if (!btn) return;
     const dir = btn.dataset.dir;
@@ -783,21 +857,34 @@
   const accountBar = $('account-bar');
   const modalRoot = $('modal-root');
 
+  const CYCLE_LABEL = { monthly: 'Monthly', yearly: 'Yearly', lifetime: 'Lifetime' };
+
   function renderAccountBar(me) {
     const plan = me.plan || {};
     const sub = me.subscription || {};
     const used = sub.scansUsed ?? 0;
     const quota = plan.scansPerPeriod ?? 0;
+    const isLifetime = sub.cycle === 'lifetime' || (sub.unlimited && plan.tier >= 3);
+    // Quota chip: lifetime → ∞, unlimited → ∞, otherwise used/quota.
+    const quotaHtml = sub.unlimited
+      ? `<span class="acct-quota">∞ scans</span>`
+      : `<span class="acct-quota">${esc(used)}/${esc(quota)} scans</span>`;
+    const cycleTag =
+      sub.cycle && sub.cycle !== 'lifetime' ? `<span class="acct-cycle">${esc(CYCLE_LABEL[sub.cycle] || sub.cycle)}</span>` : '';
+    const priorityTag = plan.prioritySupport ? `<span class="acct-priority">Priority support</span>` : '';
     accountBar.hidden = false;
     accountBar.innerHTML =
       `<span class="acct-email" title="${esc(me.email)}">${esc(me.email)}</span>` +
-      `<span class="acct-plan">${esc(plan.name || 'Free')}</span>` +
-      `<span class="acct-quota">${esc(used)}/${esc(quota)} scans</span>` +
+      `<span class="acct-plan${isLifetime ? ' lifetime' : ''}">${esc(isLifetime ? 'Lifetime' : plan.name || 'Free')}</span>` +
+      cycleTag +
+      quotaHtml +
+      priorityTag +
       `<span class="acct-spacer"></span>` +
       (me.role === 'admin' ? `<a class="acct-admin" href="/admin.html">admin</a>` : '') +
-      `<button type="button" class="acct-upgrade">Upgrade</button>` +
+      (isLifetime ? '' : `<button type="button" class="acct-upgrade">Upgrade</button>`) +
       `<button type="button" class="acct-logout">Log out</button>`;
-    accountBar.querySelector('.acct-upgrade').addEventListener('click', () => openBillingModal());
+    const up = accountBar.querySelector('.acct-upgrade');
+    if (up) up.addEventListener('click', () => openBillingModal());
     accountBar.querySelector('.acct-logout').addEventListener('click', logout);
   }
 
@@ -832,11 +919,126 @@
     modalRoot.innerHTML = '';
   }
 
+  const AI_LABEL = { none: 'No AI drafting', basic: 'AI drafting (basic)', full: 'AI drafting (full)' };
+  const fmtINR = (n) => Number(n).toLocaleString('en-IN');
+  const kmLabel = (m) => `${(m / 1000).toFixed(m % 1000 ? 1 : 0)} km radius`;
+  const pctOff = (mrp, price) => (mrp > 0 && mrp > price ? Math.round(((mrp - price) / mrp) * 100) : 0);
+
+  // Which cycle a given plan is billed on for the current toggle position.
+  // Lifetime plans always bill on 'lifetime' regardless of the toggle.
+  function cycleFor(plan, mode) {
+    if (plan.pricing?.lifetime && !plan.pricing.monthly && !plan.pricing.yearly) return 'lifetime';
+    return mode;
+  }
+
+  function planFeatures(p) {
+    const scans =
+      p.scansPerPeriod >= 100000
+        ? 'Unlimited scans'
+        : p.tier === 0
+          ? `${p.scansPerPeriod} free scans (one-time)`
+          : `${p.scansPerPeriod} scans / period`;
+    const hDays = historyDaysFor(p);
+    const historyText =
+      hDays <= 0
+        ? 'No scan history'
+        : hDays >= 365
+          ? 'Full scan history'
+          : hDays === 1
+            ? '24 hour history'
+            : `${hDays}-day scan history`;
+    return [
+      { on: true, text: scans },
+      { on: true, text: kmLabel(p.maxRadiusMeters) },
+      { on: true, text: `${fmtINR(p.maxBusinesses)} businesses / scan` },
+      { on: hDays > 0, text: historyText },
+      { on: p.psiAllowed, text: p.psiAllowed ? 'PageSpeed audits' : 'No PageSpeed audits' },
+      { on: p.aiFeatures !== 'none', text: AI_LABEL[p.aiFeatures] || 'No AI drafting' },
+      { on: p.prioritySupport, text: p.prioritySupport ? 'Priority support' : 'Standard support' },
+    ];
+  }
+
+  function planCardHtml(p, mode, currentId, billingEnabled) {
+    const isCurrent = p.id === currentId;
+    const cycle = cycleFor(p, mode);
+    const pricing = p.pricing?.[cycle];
+    const isFree = p.tier === 0 || !pricing;
+    const ribbon =
+      p.badge === 'popular'
+        ? `<span class="plan-ribbon popular">MOST POPULAR</span>`
+        : p.badge === 'best-value'
+          ? `<span class="plan-ribbon best">LIFETIME</span>`
+          : '';
+
+    // Price block
+    let priceBlock;
+    if (isFree) {
+      priceBlock = `<div class="plan-price"><span class="plan-amount">Free</span></div>` +
+        `<div class="plan-suffix">2 free scans</div>`;
+    } else {
+      const off = pctOff(pricing.mrp, pricing.price);
+      const suffix = cycle === 'lifetime' ? 'one-time' : cycle === 'yearly' ? '/yr' : '/mo';
+      priceBlock =
+        (pricing.mrp > pricing.price ? `<div class="plan-mrp">₹${fmtINR(pricing.mrp)}</div>` : '') +
+        `<div class="plan-price"><span class="plan-amount">₹${fmtINR(pricing.price)}</span>` +
+        `<span class="plan-suffix-inline"> ${esc(suffix)}</span>` +
+        (off > 0 ? `<span class="plan-off">${off}% OFF</span>` : '') +
+        `</div>` +
+        (cycle === 'yearly' ? `<div class="plan-suffix">billed yearly · 2 months free</div>` : '');
+    }
+
+    const feats = planFeatures(p)
+      .map((f) => `<li class="${f.on ? 'yes' : 'no'}">${esc(f.text)}</li>`)
+      .join('');
+
+    // CTA
+    let action;
+    if (isCurrent) action = `<button disabled>Current plan</button>`;
+    else if (isFree) action = `<span class="plan-badge">Free tier</span>`;
+    else if (!billingEnabled) action = `<button disabled title="Payments not configured">Unavailable</button>`;
+    else {
+      const label = cycle === 'lifetime' ? 'Get Lifetime' : `Upgrade — ₹${fmtINR(pricing.price)}`;
+      action = `<button class="plan-buy" data-id="${esc(p.id)}" data-cycle="${esc(cycle)}" data-name="${esc(p.name)}">${label}</button>`;
+    }
+
+    const cls =
+      `plan-card` +
+      (isCurrent ? ' current' : '') +
+      (p.badge === 'popular' ? ' popular' : '') +
+      (p.badge === 'best-value' ? ' best' : '');
+    return (
+      `<div class="${cls}">` +
+      ribbon +
+      `<h3>${esc(p.name)}</h3>` +
+      priceBlock +
+      `<ul class="plan-feats">${feats}</ul>` +
+      action +
+      `</div>`
+    );
+  }
+
+  function renderPlanGrid(grid, data, mode) {
+    const currentId = data.current?.plan?.id;
+    grid.innerHTML = (data.plans || [])
+      .map((p) => planCardHtml(p, mode, currentId, data.billingEnabled))
+      .join('');
+    grid.querySelectorAll('.plan-buy').forEach((btn) => {
+      btn.addEventListener('click', () => checkout(btn.dataset.id, btn.dataset.cycle, btn));
+    });
+  }
+
   async function openBillingModal(promptMsg) {
+    let cycleMode = 'monthly';
     modalRoot.innerHTML =
       `<div class="modal-backdrop"><div class="modal-card">` +
-      `<div class="modal-head"><h2>Plans</h2><button type="button" class="modal-close" aria-label="close">×</button></div>` +
-      (promptMsg ? `<p class="modal-sub">${esc(promptMsg)}</p>` : `<p class="modal-sub">Upgrade to raise your scan quota, radius, and unlock PageSpeed audits.</p>`) +
+      `<div class="modal-head"><h2>Choose your plan</h2><button type="button" class="modal-close" aria-label="close">×</button></div>` +
+      (promptMsg
+        ? `<p class="modal-sub">${esc(promptMsg)}</p>`
+        : `<p class="modal-sub">Raise your scan quota, widen the radius, and unlock PageSpeed audits + AI drafting.</p>`) +
+      `<div class="cycle-toggle" id="cycle-toggle" role="tablist">` +
+      `<button type="button" class="cycle-opt on" data-mode="monthly" role="tab">Monthly</button>` +
+      `<button type="button" class="cycle-opt" data-mode="yearly" role="tab">Yearly <span class="cycle-save">2 months free</span></button>` +
+      `</div>` +
       `<div class="plan-grid" id="plan-grid"><span class="hint">Loading plans…</span></div>` +
       `</div></div>`;
     const backdrop = modalRoot.querySelector('.modal-backdrop');
@@ -852,58 +1054,247 @@
       $('plan-grid').innerHTML = '<span class="hint">Could not load plans.</span>';
       return;
     }
-    const currentId = data.current?.plan?.id;
     const grid = $('plan-grid');
-    grid.innerHTML = (data.plans || [])
-      .map((p) => {
-        const isCurrent = p.id === currentId;
-        const feats = [
-          `${p.scansPerPeriod} scans / ${p.periodDays} days`,
-          `${(p.maxRadiusMeters / 1000).toFixed(p.maxRadiusMeters % 1000 ? 1 : 0)} km radius`,
-          `${p.maxBusinesses} businesses / scan`,
-          p.psiAllowed ? 'PageSpeed audits' : 'no PageSpeed',
-        ];
-        let action;
-        if (isCurrent) action = `<button disabled>Current plan</button>`;
-        else if (p.priceINR <= 0) action = `<span class="plan-badge">free tier</span>`;
-        else if (!data.billingEnabled) action = `<button disabled title="Payments not configured">Unavailable</button>`;
-        else action = `<button class="plan-buy" data-id="${esc(p.id)}">Upgrade — ₹${esc(p.priceINR)}</button>`;
-        return (
-          `<div class="plan-card${isCurrent ? ' current' : ''}">` +
-          `<h3>${esc(p.name)}</h3>` +
-          `<div class="plan-price">₹${esc(p.priceINR)}<small> / ${esc(p.periodDays)}d</small></div>` +
-          `<ul class="plan-feats">${feats.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` +
-          action +
-          `</div>`
-        );
-      })
-      .join('');
-
-    grid.querySelectorAll('.plan-buy').forEach((btn) => {
-      btn.addEventListener('click', () => checkout(btn.dataset.id, btn));
+    const toggle = $('cycle-toggle');
+    renderPlanGrid(grid, data, cycleMode);
+    toggle.addEventListener('click', (e) => {
+      const opt = e.target.closest('.cycle-opt');
+      if (!opt || opt.dataset.mode === cycleMode) return;
+      cycleMode = opt.dataset.mode;
+      toggle.querySelectorAll('.cycle-opt').forEach((b) => b.classList.toggle('on', b.dataset.mode === cycleMode));
+      renderPlanGrid(grid, data, cycleMode);
     });
   }
 
-  async function checkout(planId, btn) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Swap the body of the (already-open) billing modal card for one of the
+  // post-payment states. Guarded — a no-op if the user closed the modal.
+  function setCardBody(html) {
+    const card = modalRoot.querySelector('.modal-card');
+    if (!card) return null;
+    card.innerHTML = html;
+    return card;
+  }
+
+  // Render + autoplay one of the inline Lottie animations into `container`.
+  // Falls back to a plain glyph if lottie-web or the JSON didn't load.
+  function playLottie(container, data) {
+    if (!container) return;
+    const lot = window.lottie;
+    if (typeof lot === 'undefined' || !data) {
+      container.textContent = data === window.LOTTIE_FAIL ? '✕' : '✓';
+      container.classList.add('lottie-fallback');
+      return;
+    }
+    try {
+      lot.loadAnimation({ container, renderer: 'svg', loop: false, autoplay: true, animationData: data });
+    } catch {
+      container.textContent = data === window.LOTTIE_FAIL ? '✕' : '✓';
+      container.classList.add('lottie-fallback');
+    }
+  }
+
+  function showConfirming() {
+    setCardBody(
+      `<div class="lottie-result">` +
+        `<div class="pay-spinner" role="status" aria-label="Confirming payment"></div>` +
+        `<h2 class="lottie-title">Confirming payment…</h2>` +
+        `<p class="lottie-sub">Hang tight — we're verifying your payment.</p>` +
+        `</div>`,
+    );
+  }
+
+  // kind: 'success' | 'failure'. opts: { planName, reason }
+  function showResult(kind, opts) {
+    const success = kind === 'success';
+    const heading = success ? 'Payment successful' : 'Payment not completed';
+    const sub = success
+      ? `You're on the ${esc(opts.planName || 'new')} plan.`
+      : esc(opts.reason || 'Your payment did not go through.');
+    const actions = success
+      ? `<button type="button" class="lottie-btn primary" id="lottie-done">Done</button>`
+      : `<button type="button" class="lottie-btn primary" id="lottie-retry">Try again</button>` +
+        `<button type="button" class="lottie-btn" id="lottie-close">Close</button>`;
+    const card = setCardBody(
+      `<div class="lottie-result">` +
+        `<div class="lottie-anim ${success ? 'ok' : 'bad'}" id="lottie-anim"></div>` +
+        `<h2 class="lottie-title ${success ? 'ok' : 'bad'}">${esc(heading)}</h2>` +
+        `<p class="lottie-sub">${sub}</p>` +
+        `<div class="lottie-actions">${actions}</div>` +
+        `</div>`,
+    );
+    if (!card) return;
+    playLottie($('lottie-anim'), success ? window.LOTTIE_SUCCESS : window.LOTTIE_FAIL);
+    if (success) {
+      $('lottie-done').addEventListener('click', closeModal);
+    } else {
+      $('lottie-retry').addEventListener('click', () => openBillingModal());
+      $('lottie-close').addEventListener('click', closeModal);
+    }
+  }
+
+  // Poll the server (webhook may lag) until it reports the order paid/activated.
+  // Resolves to the paid order object, or null if it never confirms.
+  async function pollOrder(orderId, attempts) {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await fetch(`/api/billing/order/${encodeURIComponent(orderId)}`);
+        if (res.ok) {
+          const d = await res.json();
+          if (d.activated === true || d.status === 'PAID') return d;
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (i < attempts - 1) await sleep(1500);
+    }
+    return null;
+  }
+
+  async function checkout(planId, cycle, btn) {
+    const planName = btn ? btn.dataset.name : '';
+    const buyCycle = cycle || (btn ? btn.dataset.cycle : '') || 'monthly';
     if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+
+    let data;
     try {
       const res = await fetch('/api/billing/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planId }),
+        body: JSON.stringify({ planId, cycle: buyCycle }),
       });
-      const data = await res.json().catch(() => ({}));
+      data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Checkout failed (HTTP ${res.status}).`);
       if (typeof Cashfree !== 'function') throw new Error('Payment SDK failed to load.');
-      const cf = Cashfree({ mode: data.mode === 'production' ? 'production' : 'sandbox' });
-      cf.checkout({ paymentSessionId: data.payment_session_id, redirectTarget: '_self' });
     } catch (err) {
       alert(err.message || 'Could not start checkout.');
       if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+      return;
+    }
+
+    // In-page Cashfree modal. v3 `_modal` returns a Promise resolving to
+    // { error, redirect, paymentDetails } once the modal closes.
+    let cfResult;
+    try {
+      const cf = Cashfree({ mode: data.mode === 'production' ? 'production' : 'sandbox' });
+      cfResult = await cf.checkout({
+        paymentSessionId: data.payment_session_id,
+        redirectTarget: '_modal',
+      });
+    } catch (err) {
+      cfResult = { error: err };
+    }
+
+    // Cashfree modal closed — never trust its result alone; verify server-side.
+    showConfirming();
+    const cfError = cfResult && cfResult.error;
+    const order = await pollOrder(data.order_id, cfError ? 3 : 6);
+
+    if (order && (order.activated === true || order.status === 'PAID')) {
+      await refreshMe();
+      showResult('success', { planName });
+    } else if (cfError) {
+      showResult('failure', {
+        reason: 'The payment was cancelled or could not be completed. You have not been charged.',
+      });
+    } else {
+      showResult('failure', {
+        reason: "We couldn't confirm your payment yet. If money was debited it will reflect shortly — otherwise try again.",
+      });
     }
   }
 
-  // ---------------------------------------------------------------- boot
-  refreshMe();
-  loadHistory();
+  // ---------------------------------------------------------------- theme toggle
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* ignore */ }
+    tileLayer.setUrl(TILE_URL[theme]);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'light' ? '#e8eef4' : '#04070c');
+  }
+  const themeToggle = $('theme-toggle');
+  if (themeToggle) {
+    themeToggle.addEventListener('click', () => {
+      applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
+    });
+  }
+
+  // ---------------------------------------------------------------- pointer-reactive specular
+  // A radial highlight tracks the cursor across primary glass surfaces. Throttled
+  // via rAF; fully disabled under prefers-reduced-motion.
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  function initSpecular() {
+    if (reduceMotion.matches) return;
+    const surfaces = document.querySelectorAll('.glass-specular');
+    let queued = false;
+    let target = null;
+    let px = 0;
+    let py = 0;
+    const paint = () => {
+      queued = false;
+      if (target) {
+        target.style.setProperty('--mx', `${px}px`);
+        target.style.setProperty('--my', `${py}px`);
+      }
+    };
+    surfaces.forEach((el) => {
+      el.addEventListener('pointermove', (e) => {
+        const rect = el.getBoundingClientRect();
+        target = el;
+        px = e.clientX - rect.left;
+        py = e.clientY - rect.top;
+        if (!queued) {
+          queued = true;
+          requestAnimationFrame(paint);
+        }
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------- mobile bottom sheet
+  const sheetHandle = $('sheet-handle');
+  if (sheetHandle) {
+    sheetHandle.addEventListener('click', () => {
+      $('rail').classList.toggle('collapsed');
+    });
+  }
+
+  // ---------------------------------------------------------------- boot / auth gate
+  function revealApp() {
+    const loader = $('boot-loader');
+    const shell = $('app-shell');
+    shell.classList.add('ready');
+    shell.setAttribute('aria-hidden', 'false');
+    if (loader) {
+      loader.classList.add('hide');
+      setTimeout(() => { loader.hidden = true; }, 650);
+    }
+    // Map was created behind the (opaque) loader — resize now it's visible.
+    requestAnimationFrame(() => map.invalidateSize());
+  }
+
+  async function bootAuth() {
+    try {
+      const res = await fetch('/api/auth/me');
+      if (res.status === 401) {
+        // Not signed in — go straight to login with NO flash of the app UI.
+        location.href = '/login.html';
+        return;
+      }
+      if (res.ok) {
+        const me = await res.json();
+        state.me = me;
+        state.uid = me.id;
+        renderAccountBar(me);
+      }
+    } catch {
+      /* network hiccup — still reveal so the user can retry */
+    }
+    revealApp();
+    loadHistory();
+  }
+
+  initSpecular();
+  bootAuth();
 })();

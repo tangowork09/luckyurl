@@ -313,6 +313,16 @@ export interface AppConfig {
   cashfreeWebhookSecret?: string;
   /** Resolved Cashfree API base (sandbox vs production). */
   cashfreeBaseUrl: string;
+
+  /* ---- Email verification (scaffolded; enforcement OFF by default) ---- */
+  /** From RESEND_API_KEY. Present but unused until verification is wired up. */
+  resendApiKey?: string;
+  /**
+   * From REQUIRE_EMAIL_VERIFICATION. When true (future), unverified users are
+   * blocked from scanning. Default false — nothing enforces it yet. See
+   * TODO(email-verification) in server.ts.
+   */
+  requireEmailVerification: boolean;
 }
 
 /**

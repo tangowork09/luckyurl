@@ -1,8 +1,11 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  loginRateLimitAllow,
   parseCookies,
   rateLimitAllow,
+  RATE_LIMIT_POLICY,
+  registerRateLimitAllow,
   resetRateLimits,
   serializeCookie,
   signSession,
@@ -91,6 +94,34 @@ describe('login rate limit', () => {
     const key = 'ip:test';
     for (let i = 0; i < 10; i++) expect(rateLimitAllow(key, 10, 60_000)).toBe(true);
     expect(rateLimitAllow(key, 10, 60_000)).toBe(false);
+  });
+});
+
+describe('registration rate limit — per-IP cap defeats email rotation', () => {
+  it('blocks mass signups from one IP even with a fresh email each time', () => {
+    resetRateLimits();
+    const ip = '203.0.113.9';
+    const max = RATE_LIMIT_POLICY.registerPerIp.max;
+    // Each attempt uses a DIFFERENT email, so the per-email counter is always 1;
+    // only the per-IP counter accumulates and eventually blocks.
+    for (let i = 0; i < max; i++) {
+      expect(registerRateLimitAllow(ip, `fresh${i}@example.com`)).toBe(true);
+    }
+    expect(registerRateLimitAllow(ip, `fresh${max}@example.com`)).toBe(false);
+    // A DIFFERENT IP is unaffected.
+    expect(registerRateLimitAllow('198.51.100.7', 'someone@example.com')).toBe(true);
+  });
+});
+
+describe('login rate limit — per-IP cap blunts credential stuffing', () => {
+  it('blocks many login attempts from one IP across rotating emails', () => {
+    resetRateLimits();
+    const ip = '203.0.113.42';
+    const max = RATE_LIMIT_POLICY.loginPerIp.max;
+    for (let i = 0; i < max; i++) {
+      expect(loginRateLimitAllow(ip, `victim${i}@example.com`)).toBe(true);
+    }
+    expect(loginRateLimitAllow(ip, `victim${max}@example.com`)).toBe(false);
   });
 });
 

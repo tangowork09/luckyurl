@@ -16,13 +16,17 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
+  loadUserFromRequest,
+  loginRateLimitAllow,
   makeRequireAdmin,
   makeRequireAuth,
-  rateLimitAllow,
+  registerRateLimitAllow,
   serializeCookie,
   signSession,
 } from './auth';
-import { BillingService, type Plan } from './billing';
+import { isDisposableEmailDomain } from './disposable-domains';
+import { isWithinRetention, planHistoryDays } from './retention';
+import { BillingService, BILLING_CYCLES, CYCLE_PERIOD_DAYS, usageFor, type AiFeatureLevel, type BillingCycle, type CyclePricing, type Plan } from './billing';
 import { CATEGORY_GROUPS } from './categories';
 import { createOrder, fetchOrder, newOrderId, verifyWebhookSignature } from './cashfree';
 import { loadConfig } from './config';
@@ -56,10 +60,51 @@ function storeFor(userId: string): CrmStore {
 const scanRunning = new Map<string, boolean>();
 
 const app = express();
-app.set('trust proxy', true);
+// Trust EXACTLY ONE proxy hop (Railway's edge). `true` would trust the entire
+// X-Forwarded-For chain, letting a client spoof req.ip and defeat IP rate-limits.
+app.set('trust proxy', 1);
+
+/*
+ * Content-Security-Policy — ONE clearly-commented, easy-to-extend string.
+ * The frontend loads from several CDNs; each source below is required by the
+ * current app. Keep this in sync with public/ (a parallel redesign may add
+ * sources — add them here rather than loosening a directive).
+ *   NOTE: 'unsafe-inline' in script-src is required TODAY because index.html /
+ *   login.html / billing.html contain inline <script> bootstrap blocks. Prefer
+ *   a nonce/hash once the frontend redesign lands.
+ *   TODO(csp-nonce): drop script-src 'unsafe-inline' after inline scripts move
+ *   to external files or gain per-response nonces.
+ */
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self' 'unsafe-inline' https://unpkg.com https://sdk.cashfree.com https://cdnjs.cloudflare.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: https:", // map tiles (CARTO/OSM), business favicons, PSI screenshots
+  "connect-src 'self' https://nominatim.openstreetmap.org https://sandbox.cashfree.com https://api.cashfree.com",
+  'frame-src https://sdk.cashfree.com', // Cashfree checkout modal
+].join('; ');
+
+// Hand-rolled security headers on every response (no helmet dependency).
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=()');
+  res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  // HSTS only when the deployment is actually HTTPS — never over plain http.
+  if (cfg.secureCookies || cfg.appBaseUrl.startsWith('https://')) {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
+  next();
+});
 
 /* ---- Cashfree webhook: raw body BEFORE express.json for signature check ---- */
-app.post('/api/webhooks/cashfree', express.raw({ type: '*/*' }), async (req: Request, res: Response) => {
+app.post('/api/webhooks/cashfree', express.raw({ type: '*/*', limit: '100kb' }), async (req: Request, res: Response) => {
   const secret = cfg.cashfreeWebhookSecret;
   if (!secret) {
     res.status(503).json({ error: 'Billing not configured.' });
@@ -104,8 +149,8 @@ app.get('/api/config', (_req: Request, res: Response) => {
 
 /* --------------------------------- auth ----------------------------- */
 
-function setSession(res: Response, uid: string): void {
-  const token = signSession({ uid, exp: Date.now() + SESSION_TTL_MS }, cfg.sessionSecret);
+function setSession(res: Response, uid: string, tokenVersion = 0): void {
+  const token = signSession({ uid, exp: Date.now() + SESSION_TTL_MS, tv: tokenVersion }, cfg.sessionSecret);
   res.setHeader(
     'Set-Cookie',
     serializeCookie(SESSION_COOKIE, token, {
@@ -131,6 +176,7 @@ function clearSession(res: Response): void {
 
 async function meSummary(userId: string, email: string, role: string) {
   const { plan, subscription } = await billing.effective(userId);
+  const usage = usageFor(plan, subscription);
   return {
     id: userId,
     email,
@@ -138,16 +184,22 @@ async function meSummary(userId: string, email: string, role: string) {
     plan: {
       id: plan.id,
       name: plan.name,
+      tier: plan.tier,
       scansPerPeriod: plan.scansPerPeriod,
       maxRadiusMeters: plan.maxRadiusMeters,
       maxBusinesses: plan.maxBusinesses,
       psiAllowed: plan.psiAllowed,
+      aiFeatures: plan.aiFeatures,
+      prioritySupport: plan.prioritySupport,
+      historyDays: planHistoryDays(plan),
     },
     subscription: {
       status: subscription.status,
       planId: subscription.planId,
-      scansUsed: subscription.scansUsed,
-      scansRemaining: Math.max(0, plan.scansPerPeriod - subscription.scansUsed),
+      cycle: subscription.cycle ?? null,
+      unlimited: usage.unlimited,
+      scansUsed: usage.scansUsed,
+      scansRemaining: usage.scansRemaining,
       expiresAt: subscription.expiresAt,
     },
   };
@@ -167,16 +219,28 @@ app.post('/api/auth/register', guard(async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Password must be at least 8 characters.' });
     return;
   }
-  if (!rateLimitAllow(`register:${clientIp(req)}:${email.toLowerCase()}`)) {
+  // Reject disposable/temp-mail domains (no email actually sent here).
+  if (isDisposableEmailDomain(email)) {
+    res.status(400).json({ error: 'Please use a permanent email address.' });
+    return;
+  }
+  // Two counters: per-IP (blocks mass signups with rotating emails) AND per-email.
+  if (!registerRateLimitAllow(clientIp(req), email)) {
     res.status(429).json({ error: 'Too many attempts. Try again later.' });
     return;
   }
   if (await userStore.byEmail(email)) {
-    res.status(409).json({ error: 'An account with that email already exists.' });
+    // M1 tradeoff: this 409 is technically enumerable, but the per-IP register
+    // cap above makes bulk probing impractical. Message kept non-specific.
+    res.status(409).json({ error: 'Could not create an account with that email.' });
     return;
   }
   const user = await userStore.create({ email, password, role: 'user' });
-  setSession(res, user.id);
+  // TODO(email-verification): when cfg.requireEmailVerification is turned on,
+  // send a verification email here (via cfg.resendApiKey) and create the user
+  // with emailVerified:false. Today emailVerified defaults true and nothing is
+  // sent, so the no-verify signup UX is unchanged.
+  setSession(res, user.id, user.tokenVersion);
   res.json(await meSummary(user.id, user.email, user.role));
 }));
 
@@ -184,7 +248,9 @@ app.post('/api/auth/login', guard(async (req: Request, res: Response) => {
   const body = req.body as { email?: unknown; password?: unknown };
   const email = typeof body.email === 'string' ? body.email.trim() : '';
   const password = typeof body.password === 'string' ? body.password : '';
-  if (!rateLimitAllow(`login:${clientIp(req)}:${email.toLowerCase()}`)) {
+  // Two counters: per-email brute-force guard AND per-IP (blunts credential
+  // stuffing that rotates the email across many accounts from one IP).
+  if (!loginRateLimitAllow(clientIp(req), email)) {
     res.status(429).json({ error: 'Too many attempts. Try again in a few minutes.' });
     return;
   }
@@ -194,18 +260,43 @@ app.post('/api/auth/login', guard(async (req: Request, res: Response) => {
     res.status(401).json({ error: 'Invalid email or password.' });
     return;
   }
-  setSession(res, user.id);
+  setSession(res, user.id, user.tokenVersion);
   res.json(await meSummary(user.id, user.email, user.role));
 }));
 
-app.post('/api/auth/logout', (_req: Request, res: Response) => {
+app.post('/api/auth/logout', guard(async (req: Request, res: Response) => {
+  // Bump tokenVersion so the just-cleared cookie can't be replayed after logout.
+  const user = await loadUserFromRequest(req, authDeps);
+  if (user) await userStore.bumpTokenVersion(user.id);
   clearSession(res);
   res.json({ ok: true });
-});
+}));
 
 app.get('/api/auth/me', requireAuth, guard(async (req: Request, res: Response) => {
   const user = req.user!; // requireAuth guarantees this
   res.json(await meSummary(user.id, user.email, user.role));
+}));
+
+app.post('/api/auth/change-password', requireAuth, guard(async (req: Request, res: Response) => {
+  const user = req.user!;
+  const body = req.body as { currentPassword?: unknown; newPassword?: unknown };
+  const current = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+  const next = typeof body.newPassword === 'string' ? body.newPassword : '';
+  if (next.length < 8) {
+    res.status(400).json({ error: 'New password must be at least 8 characters.' });
+    return;
+  }
+  const full = await userStore.byId(user.id);
+  const ok = full && (await verifyPassword(current, full.passwordHash, full.salt));
+  if (!full || !ok) {
+    res.status(401).json({ error: 'Current password is incorrect.' });
+    return;
+  }
+  // updatePassword bumps tokenVersion → every OTHER session is invalidated.
+  const updated = await userStore.updatePassword(user.id, next);
+  // Re-issue THIS session's cookie at the new version so the caller stays in.
+  setSession(res, updated!.id, updated!.tokenVersion);
+  res.json({ ok: true });
 }));
 
 /* -------------------- auth gate for the rest of /api ------------------ */
@@ -238,11 +329,22 @@ app.get('/api/categories', (_req: Request, res: Response) => {
 });
 
 app.get('/api/leads', guard(async (req: Request, res: Response) => {
+  // Per-plan history retention: hide (never delete) scan dirs older than the
+  // plan's window. historyDays===0 (free) locks history entirely.
+  const { plan } = await billing.effective(req.user!.id);
+  const historyDays = planHistoryDays(plan);
+  const retentionLocked = historyDays === 0;
+  if (retentionLocked) {
+    res.json({ scans: [], historyDays, retentionLocked });
+    return;
+  }
   const userRoot = join(LEADS_ROOT, req.user!.id);
+  const now = Date.now();
   try {
     const dirs = (await readdir(userRoot, { withFileTypes: true }))
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
+      .filter((name) => isWithinRetention(name, historyDays, now))
       .sort()
       .reverse();
     const scans = await Promise.all(
@@ -264,9 +366,9 @@ app.get('/api/leads', guard(async (req: Request, res: Response) => {
         }
       }),
     );
-    res.json(scans.filter(Boolean));
+    res.json({ scans: scans.filter(Boolean), historyDays, retentionLocked });
   } catch {
-    res.json([]); // no dir yet — nothing scanned
+    res.json({ scans: [], historyDays, retentionLocked }); // no dir yet — nothing scanned
   }
 }));
 
@@ -387,57 +489,72 @@ function parseScanRequest(body: unknown): ScanRequest | null {
 
 app.post('/api/scan', async (req: Request, res: Response) => {
   const user = req.user!;
+  // Reserve the per-user scan lock SYNCHRONOUSLY — between this get() and set()
+  // there is no await, so two concurrent requests can't both pass the guard.
   if (scanRunning.get(user.id)) {
     res.status(409).json({ error: 'A scan is already running.' });
     return;
   }
-  const scanReq = parseScanRequest(req.body);
-  if (!scanReq) {
-    res.status(400).json({ error: 'Invalid scan request: need area.center.lat/lng and radiusMeters 100..50000.' });
-    return;
-  }
-
-  // Plan enforcement: quota (402), then clamp radius/businesses/PSI to plan.
-  let consume;
-  try {
-    consume = await billing.consumeScan(user.id);
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'billing error' });
-    return;
-  }
-  if (!consume.ok) {
-    res.status(402).json({ error: consume.reason, planId: consume.plan.id, upgrade: true });
-    return;
-  }
-  const plan = consume.plan;
-  scanReq.area.radiusMeters = Math.min(scanReq.area.radiusMeters, plan.maxRadiusMeters);
-  scanReq.maxBusinesses = Math.min(scanReq.maxBusinesses ?? plan.maxBusinesses, plan.maxBusinesses);
-  if (!plan.psiAllowed) scanReq.psi = false;
-  scanReq.outDir = join(LEADS_ROOT, user.id);
-
   scanRunning.set(user.id, true);
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  res.flushHeaders?.();
-
-  const abort = new AbortController();
-  res.on('close', () => abort.abort());
-
-  const send = (e: ProgressEvent) => {
-    if (!abort.signal.aborted) res.write(`data: ${JSON.stringify(e)}\n\n`);
-  };
-
+  // Single try/finally guarantees the lock is cleared on EVERY exit path —
+  // validation 400, quota 402, billing 500, scan error, or normal stream end.
   try {
-    await runScan(cfg, scanReq, send, { store: storeFor(user.id), signal: abort.signal });
-  } catch (err) {
-    console.error('Scan failed:', err instanceof Error ? err.message : err);
+    const scanReq = parseScanRequest(req.body);
+    if (!scanReq) {
+      res.status(400).json({ error: 'Invalid scan request: need area.center.lat/lng and radiusMeters 100..50000.' });
+      return;
+    }
+
+    // Plan enforcement: quota (402), then clamp radius/businesses/PSI to plan.
+    // consumeScan is atomic per user, so the lock + this check both prevent
+    // over-consumption under concurrency.
+    let consume;
+    try {
+      consume = await billing.consumeScan(user.id);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'billing error' });
+      return;
+    }
+    if (!consume.ok) {
+      res.status(402).json({ error: consume.reason, planId: consume.plan.id, upgrade: true });
+      return;
+    }
+    const plan = consume.plan;
+    scanReq.area.radiusMeters = Math.min(scanReq.area.radiusMeters, plan.maxRadiusMeters);
+    scanReq.maxBusinesses = Math.min(scanReq.maxBusinesses ?? plan.maxBusinesses, plan.maxBusinesses);
+    if (!plan.psiAllowed) scanReq.psi = false;
+    // AI feature gating: local-model draft generation (draft.ts via `ensemble`)
+    // is the only AI surface today. Free (aiFeatures 'none') can't use it.
+    // TODO(ai-gating): when richer AI endpoints land (e.g. rewrite/expand a pitch),
+    // branch on plan.aiFeatures — 'basic' unlocks entry-level AI, 'full' unlocks
+    // everything — both here and at those new endpoints.
+    if (plan.aiFeatures === 'none') scanReq.draft = false;
+    scanReq.outDir = join(LEADS_ROOT, user.id);
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders?.();
+
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+
+    const send = (e: ProgressEvent) => {
+      if (!abort.signal.aborted) res.write(`data: ${JSON.stringify(e)}\n\n`);
+    };
+
+    try {
+      await runScan(cfg, scanReq, send, { store: storeFor(user.id), signal: abort.signal });
+    } catch (err) {
+      console.error('Scan failed:', err instanceof Error ? err.message : err);
+    } finally {
+      res.end();
+    }
   } finally {
     scanRunning.set(user.id, false);
-    res.end();
   }
 });
 
@@ -454,18 +571,31 @@ app.get('/api/billing/plans', guard(async (req: Request, res: Response) => {
 }));
 
 app.post('/api/billing/checkout', guard(async (req: Request, res: Response) => {
-  if (!cfg.cashfreeAppId || !cfg.cashfreeSecretKey) {
-    res.status(503).json({ error: 'Payments are not configured on this server.' });
-    return;
-  }
-  const planId = (req.body as { planId?: string }).planId;
-  const plan = planId ? await billing.getPlan(planId) : undefined;
+  // Validate the request (plan + cycle + price) BEFORE the Cashfree-config
+  // check so bad requests always 400, even when payments aren't wired up.
+  const body = req.body as { planId?: string; cycle?: string };
+  const plan = body.planId ? await billing.getPlan(body.planId) : undefined;
   if (!plan || !plan.active) {
     res.status(400).json({ error: 'Unknown or inactive plan.' });
     return;
   }
-  if (plan.priceINR <= 0) {
+  const cycle = body.cycle;
+  if (!cycle || !BILLING_CYCLES.includes(cycle as BillingCycle)) {
+    res.status(400).json({ error: `cycle must be one of ${BILLING_CYCLES.join(', ')}.` });
+    return;
+  }
+  const pricing = plan.pricing[cycle as BillingCycle];
+  if (!pricing) {
+    res.status(400).json({ error: `The ${plan.name} plan does not offer a ${cycle} billing cycle.` });
+    return;
+  }
+  if (pricing.price <= 0) {
     res.status(400).json({ error: 'That plan is free — no payment needed.' });
+    return;
+  }
+
+  if (!cfg.cashfreeAppId || !cfg.cashfreeSecretKey) {
+    res.status(503).json({ error: 'Payments are not configured on this server.' });
     return;
   }
   const user = req.user!;
@@ -475,19 +605,20 @@ app.post('/api/billing/checkout', guard(async (req: Request, res: Response) => {
     { appId: cfg.cashfreeAppId, secretKey: cfg.cashfreeSecretKey, baseUrl: cfg.cashfreeBaseUrl },
     {
       orderId,
-      amountINR: plan.priceINR,
+      amountINR: pricing.price,
       customerId: user.id,
       customerEmail: user.email,
       customerPhone: user.phone || '9999999999',
       returnUrl,
-      note: plan.id,
+      note: `${plan.id}:${cycle}`,
     },
   );
   await billing.createOrder({
     id: orderId,
     userId: user.id,
     planId: plan.id,
-    amountINR: plan.priceINR,
+    cycle: cycle as BillingCycle,
+    amountINR: pricing.price,
     paymentSessionId: order.payment_session_id,
   });
   res.json({ payment_session_id: order.payment_session_id, order_id: orderId, mode: cfg.cashfreeEnv });
@@ -540,17 +671,46 @@ function validatePlan(body: unknown): Plan | null {
   const name = typeof b.name === 'string' ? b.name.trim() : '';
   if (!id || !name) return null;
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d);
-  return {
+
+  const aiRaw = typeof b.aiFeatures === 'string' ? b.aiFeatures : 'none';
+  const aiFeatures: AiFeatureLevel = aiRaw === 'full' ? 'full' : aiRaw === 'basic' ? 'basic' : 'none';
+
+  // Build the per-cycle pricing map. Accept either a nested `pricing` object or
+  // flat admin-form fields (monthlyPrice/monthlyMrp/yearlyPrice/…/lifetimePrice).
+  const pricing: Partial<Record<BillingCycle, CyclePricing>> = {};
+  const cyclePrice = (cycle: BillingCycle, price: number, mrp: number) => {
+    if (price > 0) pricing[cycle] = { price, mrp: Math.max(mrp, price), periodDays: CYCLE_PERIOD_DAYS[cycle] };
+  };
+  const nested = b.pricing;
+  if (nested && typeof nested === 'object') {
+    for (const cycle of BILLING_CYCLES) {
+      const cp = (nested as Record<string, unknown>)[cycle] as { price?: unknown; mrp?: unknown } | undefined;
+      if (cp) cyclePrice(cycle, Math.max(0, num(cp.price, 0)), Math.max(0, num(cp.mrp, 0)));
+    }
+  } else {
+    cyclePrice('monthly', Math.max(0, num(b.monthlyPrice, 0)), Math.max(0, num(b.monthlyMrp, 0)));
+    cyclePrice('yearly', Math.max(0, num(b.yearlyPrice, 0)), Math.max(0, num(b.yearlyMrp, 0)));
+    cyclePrice('lifetime', Math.max(0, num(b.lifetimePrice, 0)), Math.max(0, num(b.lifetimeMrp, 0)));
+  }
+
+  const badge = b.badge === 'popular' ? 'popular' : b.badge === 'best-value' ? 'best-value' : undefined;
+
+  const plan: Plan = {
     id,
     name,
-    priceINR: Math.max(0, num(b.priceINR, 0)),
-    periodDays: Math.max(1, num(b.periodDays, 30)),
+    tier: Math.max(0, num(b.tier, 1)),
     scansPerPeriod: Math.max(0, num(b.scansPerPeriod, 0)),
     maxRadiusMeters: Math.max(100, num(b.maxRadiusMeters, 1500)),
-    psiAllowed: b.psiAllowed === true,
     maxBusinesses: Math.max(1, num(b.maxBusinesses, 50)),
+    psiAllowed: b.psiAllowed === true,
+    aiFeatures,
+    prioritySupport: b.prioritySupport === true,
+    historyDays: Math.max(0, num(b.historyDays, 0)),
+    pricing,
     active: b.active !== false,
   };
+  if (badge) plan.badge = badge;
+  return plan;
 }
 
 app.get('/api/admin/users', requireAdmin, guard(async (_req: Request, res: Response) => {
@@ -558,12 +718,15 @@ app.get('/api/admin/users', requireAdmin, guard(async (_req: Request, res: Respo
   const rows = await Promise.all(
     users.map(async (u) => {
       const { plan, subscription } = await billing.effective(u.id);
+      const usage = usageFor(plan, subscription);
       return {
         ...UserStore.publicView(u),
         planId: plan.id,
         planName: plan.name,
-        scansUsed: subscription.scansUsed,
+        cycle: subscription.cycle ?? null,
+        scansUsed: usage.scansUsed,
         scansPerPeriod: plan.scansPerPeriod,
+        unlimited: usage.unlimited,
         status: subscription.status,
         expiresAt: subscription.expiresAt,
       };

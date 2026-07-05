@@ -7,6 +7,7 @@
  */
 import type { WebsiteAudit, WebsiteIssue } from './types';
 import { auditScore } from './score';
+import { safeFetch } from './safeurl';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const PSI_TIMEOUT_MS = 60_000;
@@ -520,9 +521,9 @@ async function checkLinksAndForms(
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), Math.min(timeoutMs, 8000));
       try {
-        let res = await fetch(u, { method: 'HEAD', redirect: 'follow', signal: ac.signal, headers: { 'User-Agent': USER_AGENT } });
+        let res = await safeFetch(u, { method: 'HEAD', signal: ac.signal, headers: { 'User-Agent': USER_AGENT } });
         // Some servers reject HEAD (405) — retry GET before calling it broken.
-        if (res.status === 405) res = await fetch(u, { method: 'GET', redirect: 'follow', signal: ac.signal, headers: { 'User-Agent': USER_AGENT } });
+        if (res.status === 405) res = await safeFetch(u, { method: 'GET', signal: ac.signal, headers: { 'User-Agent': USER_AGENT } });
         return res.status >= 400;
       } finally {
         clearTimeout(t);
@@ -566,8 +567,10 @@ async function fetchOnce(url: string, timeoutMs: number): Promise<{ res: Respons
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   const started = Date.now();
   try {
-    const res = await fetch(url, {
-      redirect: 'follow',
+    // safeFetch validates the target as a PUBLIC host and follows redirects
+    // manually, re-validating every hop (SSRF + DNS-rebinding defence). A
+    // blocked target throws → auditWebsite turns it into an 'unreachable' issue.
+    const res = await safeFetch(url, {
       signal: ac.signal,
       headers: {
         'User-Agent': USER_AGENT,
@@ -628,7 +631,9 @@ async function runPsi(pageUrl: string, key?: string): Promise<WebsiteAudit['psi'
       'https://www.googleapis.com/pagespeedonline/v5/runPagespeed' +
       `?url=${encodeURIComponent(pageUrl)}&strategy=MOBILE${cats}` +
       (key ? `&key=${encodeURIComponent(key)}` : '');
-    const res = await fetch(endpoint, { signal: ac.signal });
+    // Route through safeFetch too: validates the googleapis.com endpoint host
+    // (always public) and keeps a single vetted fetch path for outbound calls.
+    const res = await safeFetch(endpoint, { signal: ac.signal });
     if (!res.ok) return undefined;
     const data = (await res.json()) as {
       lighthouseResult?: {
