@@ -336,3 +336,143 @@ describe('admin grant + revoke', () => {
     expect(await b.grant('user-a', 'ghost', 30)).toBeUndefined();
   });
 });
+
+describe('checkout no-op re-purchase guard (same plan + cycle)', () => {
+  // The /api/billing/checkout route rejects a re-buy of the plan the user is
+  // already on (400 "You're already on this plan.") to stop the free-quota-
+  // refresh exploit. There is no HTTP route harness, so we exercise the exact
+  // predicate the route relies on: effective() reporting an active paid tier
+  // with a matching planId + cycle (block), vs. a lazily-downgraded free sub
+  // (tier 0 → allow re-buy).
+  const isSamePlan = (eff: Awaited<ReturnType<BillingService['effective']>>, planId: string, cycle: string) =>
+    eff.plan.tier > 0 && eff.subscription.planId === planId && eff.subscription.cycle === cycle;
+
+  it('an active paid sub reports the same plan + cycle it was activated on', async () => {
+    const b = await fresh();
+    const pro = (await b.getPlan('pro'))!;
+    await b.activateSubscription('user-a', pro, 'monthly');
+    const eff = await b.effective('user-a');
+    // Guard fires for the identical plan+cycle...
+    expect(isSamePlan(eff, 'pro', 'monthly')).toBe(true);
+    // ...but not for a different cycle or a different plan (legitimate switch).
+    expect(isSamePlan(eff, 'pro', 'yearly')).toBe(false);
+    expect(isSamePlan(eff, 'starter', 'monthly')).toBe(false);
+  });
+
+  it('lifetime-on-lifetime is treated as the same plan + cycle (blocked)', async () => {
+    const b = await fresh();
+    const lifetime = (await b.getPlan('lifetime'))!;
+    await b.activateSubscription('user-a', lifetime, 'lifetime');
+    expect(isSamePlan(await b.effective('user-a'), 'lifetime', 'lifetime')).toBe(true);
+  });
+
+  it('an expired paid sub reads as free (tier 0) so a re-buy is allowed', async () => {
+    const b = await fresh();
+    const pro = (await b.getPlan('pro'))!;
+    await b.activateSubscription('user-a', pro, 'monthly');
+    // Force expiry on disk, reload → effective() lazily downgrades to free.
+    const path = join(dir, 'subscriptions.json');
+    const subs = JSON.parse(await readFile(path, 'utf8')) as Subscription[];
+    for (const s of subs) if (s.userId === 'user-a') s.expiresAt = new Date(Date.now() - 1000).toISOString();
+    await writeFile(path, JSON.stringify(subs), 'utf8');
+
+    const b2 = new BillingService(dir);
+    await b2.init();
+    const eff = await b2.effective('user-a');
+    expect(eff.plan.tier).toBe(0);
+    expect(isSamePlan(eff, 'pro', 'monthly')).toBe(false); // guard does NOT fire
+  });
+
+  it('a fresh free user is never blocked (tier 0)', async () => {
+    const b = await fresh();
+    const eff = await b.effective('user-a');
+    expect(isSamePlan(eff, 'free', undefined as unknown as string)).toBe(false);
+  });
+});
+
+describe('prorationCredit — unused-time credit for in-cycle switches', () => {
+  // Move a user's sub so exactly `remainingDays` of unused time is left (credit
+  // keys off expiresAt, not startedAt).
+  async function setRemaining(remainingDays: number): Promise<void> {
+    const path = join(dir, 'subscriptions.json');
+    const subs = JSON.parse(await readFile(path, 'utf8')) as Subscription[];
+    const expiresAt = new Date(Date.now() + remainingDays * DAY).toISOString();
+    for (const s of subs) if (s.userId === 'user-a') s.expiresAt = expiresAt;
+    await writeFile(path, JSON.stringify(subs), 'utf8');
+  }
+
+  it('gives a free user 0 credit', async () => {
+    const b = await fresh();
+    await b.effective('user-a'); // materialize the implicit free sub
+    const { creditINR, sub } = await b.prorationCredit('user-a');
+    expect(creditINR).toBe(0);
+    expect(sub?.planId).toBe(FREE_PLAN_ID);
+  });
+
+  it('gives a user with no sub record 0 credit', async () => {
+    const b = await fresh();
+    const { creditINR, sub } = await b.prorationCredit('nobody');
+    expect(creditINR).toBe(0);
+    expect(sub).toBeNull();
+  });
+
+  it('credits ~floor(price*remaining/period) for an active monthly pro halfway through', async () => {
+    const b = await fresh();
+    const pro = (await b.getPlan('pro'))!; // monthly price 950, periodDays 30
+    await b.activateSubscription('user-a', pro, 'monthly');
+
+    const { creditINR } = await b.prorationCredit('user-a');
+    // Fresh sub → nearly the full 30 days remain → credit ≈ full price.
+    expect(creditINR).toBeGreaterThan(940);
+    expect(creditINR).toBeLessThanOrEqual(950);
+
+    // Leave ~15 of 30 days remaining → ~half the price credited.
+    await setRemaining(15);
+    const b2 = new BillingService(dir);
+    await b2.init();
+    const half = await b2.prorationCredit('user-a');
+    const price = pro.pricing.monthly!.price;
+    const remaining = (new Date((await b2.effective('user-a')).subscription.expiresAt!).getTime() - Date.now()) / DAY;
+    expect(half.creditINR).toBe(Math.floor((price * Math.min(30, Math.max(0, remaining))) / 30));
+    expect(half.creditINR).toBeGreaterThan(450);
+    expect(half.creditINR).toBeLessThan(500);
+  });
+
+  it('credits 0 for an expired paid sub', async () => {
+    const b = await fresh();
+    const starter = (await b.getPlan('starter'))!;
+    await b.activateSubscription('user-a', starter, 'monthly');
+    // Force expiry on disk.
+    const path = join(dir, 'subscriptions.json');
+    const subs = JSON.parse(await readFile(path, 'utf8')) as Subscription[];
+    for (const s of subs) if (s.userId === 'user-a') s.expiresAt = new Date(Date.now() - 1000).toISOString();
+    await writeFile(path, JSON.stringify(subs), 'utf8');
+
+    const b2 = new BillingService(dir);
+    await b2.init();
+    expect((await b2.prorationCredit('user-a')).creditINR).toBe(0);
+  });
+
+  it('credits 0 for a lifetime (never-expires) sub', async () => {
+    const b = await fresh();
+    const lifetime = (await b.getPlan('lifetime'))!;
+    await b.activateSubscription('user-a', lifetime, 'lifetime');
+    expect((await b.prorationCredit('user-a')).creditINR).toBe(0);
+  });
+
+  it('clamps remaining time to 0 when expiresAt is slightly in the past', async () => {
+    const b = await fresh();
+    const pro = (await b.getPlan('pro'))!;
+    await b.activateSubscription('user-a', pro, 'monthly');
+    // Nudge expiresAt just barely into the past — remaining clamps to 0, not negative.
+    const path = join(dir, 'subscriptions.json');
+    const subs = JSON.parse(await readFile(path, 'utf8')) as Subscription[];
+    for (const s of subs) if (s.userId === 'user-a') s.expiresAt = new Date(Date.now() - 1).toISOString();
+    await writeFile(path, JSON.stringify(subs), 'utf8');
+
+    const b2 = new BillingService(dir);
+    await b2.init();
+    // A past expiresAt is "expired" → credit 0 (never negative).
+    expect((await b2.prorationCredit('user-a')).creditINR).toBe(0);
+  });
+});

@@ -933,6 +933,10 @@
 
   const AI_LABEL = { none: 'No AI drafting', basic: 'AI drafting (basic)', full: 'AI drafting (full)' };
   const fmtINR = (n) => Number(n).toLocaleString('en-IN');
+  const fmtDate = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  };
   const kmLabel = (m) => `${(m / 1000).toFixed(m % 1000 ? 1 : 0)} km radius`;
   const pctOff = (mrp, price) => (mrp > 0 && mrp > price ? Math.round(((mrp - price) / mrp) * 100) : 0);
 
@@ -970,7 +974,11 @@
     ];
   }
 
-  function planCardHtml(p, mode, currentId, billingEnabled) {
+  function planCardHtml(p, mode, current, billingEnabled) {
+    const currentId = current?.plan?.id;
+    const currentTier = current?.plan?.tier ?? 0;
+    const currentCycle = current?.subscription?.cycle;
+    const creditINR = current?.creditINR || 0;
     const isCurrent = p.id === currentId;
     const cycle = cycleFor(p, mode);
     const pricing = p.pricing?.[cycle];
@@ -1003,14 +1011,45 @@
       .map((f) => `<li class="${f.on ? 'yes' : 'no'}">${esc(f.text)}</li>`)
       .join('');
 
-    // CTA
+    // CTA. Credit for unused time (from the server) discounts an in-cycle
+    // switch/upgrade; payable is what the user actually pays after that credit.
     let action;
-    if (isCurrent) action = `<button disabled>Current plan</button>`;
-    else if (isFree) action = `<span class="plan-badge">Free tier</span>`;
-    else if (!billingEnabled) action = `<button disabled title="Payments not configured">Unavailable</button>`;
-    else {
-      const label = cycle === 'lifetime' ? 'Get Lifetime' : `Upgrade — ₹${fmtINR(pricing.price)}`;
-      action = `<button class="plan-buy" data-id="${esc(p.id)}" data-cycle="${esc(cycle)}" data-tier="${esc(p.tier)}" data-name="${esc(p.name)}">${label}</button>`;
+    if (isFree) {
+      // Free-tier card is unchanged: current → disabled, otherwise a plain badge.
+      action = isCurrent ? `<button disabled>Current plan</button>` : `<span class="plan-badge">Free tier</span>`;
+    } else if (!billingEnabled) {
+      action = `<button disabled title="Payments not configured">Unavailable</button>`;
+    } else if (isCurrent && cycle === currentCycle) {
+      // On this exact plan+cycle → manage it (no purchase). Lifetime can't be cancelled.
+      const sub = current?.subscription;
+      const until = sub?.expiresAt
+        ? `<div class="plan-active-until">Active until ${esc(fmtDate(sub.expiresAt))} · does not auto-renew</div>`
+        : '';
+      const cancel = cycle === 'lifetime'
+        ? ''
+        : `<button class="plan-cancel" data-name="${esc(p.name)}">Cancel plan</button>`;
+      action = `<button disabled>Current plan</button>` + until + cancel;
+    } else {
+      const payable = Math.max(0, pricing.price - creditINR);
+      const credited = creditINR > 0 && payable < pricing.price;
+      const cycleLabel = cycle === 'yearly' ? 'Yearly' : cycle === 'monthly' ? 'Monthly' : 'Lifetime';
+      let label;
+      if (isCurrent) {
+        // Same plan, different cycle (both paid).
+        label = payable === 0
+          ? `Switch to ${cycleLabel} — free (credit covers it)`
+          : `Switch to ${cycleLabel} — ₹${fmtINR(payable)}`;
+      } else if (cycle === 'lifetime') {
+        label = `Get Lifetime — ₹${fmtINR(payable)}`;
+      } else if (p.tier > currentTier) {
+        label = `Upgrade — ₹${fmtINR(payable)}`;
+      } else {
+        label = `Downgrade — ₹${fmtINR(payable)}`;
+      }
+      const note = credited
+        ? `<div class="plan-credit-note">₹${fmtINR(creditINR)} credit for unused time applied</div>`
+        : '';
+      action = `<button class="plan-buy" data-id="${esc(p.id)}" data-cycle="${esc(cycle)}" data-tier="${esc(p.tier)}" data-name="${esc(p.name)}">${label}</button>` + note;
     }
 
     const cls =
@@ -1033,9 +1072,8 @@
     // The cycle toggle re-renders this grid — free the previous buttons' GL
     // contexts before innerHTML discards them (never leak on toggle).
     if (window.LFLiquid) grid.querySelectorAll('.plan-buy').forEach((b) => b._lfLiquid?.destroy());
-    const currentId = data.current?.plan?.id;
     grid.innerHTML = (data.plans || [])
-      .map((p) => planCardHtml(p, mode, currentId, data.billingEnabled))
+      .map((p) => planCardHtml(p, mode, data.current, data.billingEnabled))
       .join('');
     grid.querySelectorAll('.plan-buy').forEach((btn) => {
       btn.addEventListener('click', () => checkout(btn.dataset.id, btn.dataset.cycle, btn));
@@ -1045,6 +1083,9 @@
         const variant = btn.dataset.cycle === 'lifetime' || tier >= 3 ? 'gold' : tier === 2 ? 'indigo' : 'teal';
         LFLiquid.enhanceButton(btn, { variant });
       }
+    });
+    grid.querySelectorAll('.plan-cancel').forEach((btn) => {
+      btn.addEventListener('click', () => confirmCancel(btn.dataset.name));
     });
   }
 
@@ -1157,6 +1198,39 @@
     }
   }
 
+  // In-modal cancel confirmation (no window.confirm). Swaps the plan grid for a
+  // heading + policy copy + Keep / Cancel actions, then downgrades to free.
+  function confirmCancel(planName) {
+    const card = setCardBody(
+      `<div class="lottie-result">` +
+        `<h2 class="lottie-title">Cancel ${esc(planName || 'your plan')}?</h2>` +
+        `<p class="lottie-sub">Your plan deactivates immediately. Remaining time is forfeited and no refund is issued. You'll be moved to the Free plan.</p>` +
+        `<div class="lottie-actions">` +
+          `<button type="button" class="lottie-btn primary" id="cancel-keep">Keep plan</button>` +
+          `<button type="button" class="lottie-btn danger" id="cancel-confirm">Cancel plan</button>` +
+        `</div>` +
+        `</div>`,
+    );
+    if (!card) return;
+    $('cancel-keep').addEventListener('click', () => openBillingModal());
+    $('cancel-confirm').addEventListener('click', async () => {
+      const btn = $('cancel-confirm');
+      btn.disabled = true; btn.textContent = 'Cancelling…';
+      try {
+        const res = await fetch('/api/billing/cancel', { method: 'POST' });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(d.error || `Cancel failed (HTTP ${res.status}).`);
+        await refreshMe();
+        // refreshMe must complete first so state.me.plan is fresh before history re-renders
+        loadHistory();
+        openBillingModal(); // fresh fetch shows Free as the current plan
+      } catch (err) {
+        alert(err.message || 'Could not cancel your plan.');
+        btn.disabled = false; btn.textContent = 'Cancel plan';
+      }
+    });
+  }
+
   // Poll the server (webhook may lag) until it reports the order paid/activated.
   // Resolves to the paid order object, or null if it never confirms.
   async function pollOrder(orderId, attempts) {
@@ -1189,6 +1263,15 @@
       });
       data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Checkout failed (HTTP ${res.status}).`);
+      // Prorated credit fully covered the plan — the server activated it directly,
+      // there is no Cashfree order to pay. Skip the payment modal + polling.
+      if (data.activated === true && !data.payment_session_id) {
+        await refreshMe();
+        // refreshMe must complete first so state.me.plan is fresh before history re-renders
+        loadHistory();
+        showResult('success', { planName });
+        return;
+      }
       if (typeof Cashfree !== 'function') throw new Error('Payment SDK failed to load.');
     } catch (err) {
       alert(err.message || 'Could not start checkout.');

@@ -98,6 +98,8 @@ export interface Order {
   createdAt: string;
   paidAt?: string;
   paymentSessionId?: string;
+  /** Prorated rupee credit deducted from this order's amount (in-cycle switch). */
+  creditApplied?: number;
 }
 
 export const FREE_PLAN_ID = 'free';
@@ -414,6 +416,36 @@ export class BillingService {
     return this.freeSubFor(userId, existing?.id, existing?.freeScansUsed ?? 0);
   }
 
+  /**
+   * Prorated rupee credit for the UNUSED time left on a user's current paid sub,
+   * used to discount an in-cycle upgrade/switch. Credit is 0 unless the user is
+   * on a live (non-expired) paid monthly/yearly sub whose plan still prices that
+   * cycle — free, expired, and lifetime (null expiresAt) subs earn nothing. The
+   * remaining-days ratio is clamped to [0, periodDays] so a slightly-past expiry
+   * or a clock skew can't produce a negative or over-full credit.
+   */
+  async prorationCredit(userId: string): Promise<{ creditINR: number; sub: Subscription | null }> {
+    const sub = (await this.rawSub(userId)) ?? null;
+    const now = Date.now();
+    if (
+      !sub ||
+      sub.expiresAt == null ||
+      isExpired(sub.expiresAt, now) ||
+      (sub.cycle !== 'monthly' && sub.cycle !== 'yearly')
+    ) {
+      return { creditINR: 0, sub };
+    }
+    const plan = await this.getPlan(sub.planId);
+    if (!plan || plan.tier <= 0) return { creditINR: 0, sub };
+    const pricing = plan.pricing[sub.cycle];
+    if (!pricing) return { creditINR: 0, sub };
+    const periodDays = pricing.periodDays ?? CYCLE_PERIOD_DAYS[sub.cycle];
+    if (periodDays == null || periodDays <= 0) return { creditINR: 0, sub };
+    const remainingDays = Math.min(periodDays, Math.max(0, (new Date(sub.expiresAt).getTime() - now) / DAY_MS));
+    const creditINR = Math.floor((pricing.price * remainingDays) / periodDays);
+    return { creditINR, sub };
+  }
+
   /* -------------------------------- orders ------------------------------ */
 
   async createOrder(input: {
@@ -422,6 +454,7 @@ export class BillingService {
     planId: string;
     cycle: BillingCycle;
     amountINR: number;
+    creditApplied?: number;
     paymentSessionId?: string;
   }): Promise<Order> {
     const order: Order = {
@@ -433,6 +466,7 @@ export class BillingService {
       status: 'pending',
       createdAt: new Date().toISOString(),
       paymentSessionId: input.paymentSessionId,
+      creditApplied: input.creditApplied,
     };
     return this.orders.put(order);
   }

@@ -563,9 +563,10 @@ app.post('/api/scan', async (req: Request, res: Response) => {
 app.get('/api/billing/plans', guard(async (req: Request, res: Response) => {
   const plans = await billing.activePlans();
   const current = await billing.effective(req.user!.id);
+  const { creditINR } = await billing.prorationCredit(req.user!.id);
   res.json({
     plans,
-    current: { plan: current.plan, subscription: current.subscription },
+    current: { plan: current.plan, subscription: current.subscription, creditINR },
     billingEnabled: Boolean(cfg.cashfreeAppId && cfg.cashfreeSecretKey),
   });
 }));
@@ -594,18 +595,48 @@ app.post('/api/billing/checkout', guard(async (req: Request, res: Response) => {
     return;
   }
 
+  const user = req.user!;
+
+  // Reject a no-op re-purchase of the plan the user is ALREADY on (same plan +
+  // same cycle). Otherwise the proration credit for the identical live sub ≈ the
+  // full price → payable 0 → activateSubscription resets scansUsed, handing the
+  // user a free quota refresh they could repeat. `effective` applies lazy expiry,
+  // so an expired sub reads as free (tier 0) and legitimately re-buys. Buying
+  // lifetime while on lifetime is the same plan+cycle and is correctly blocked.
+  const current = await billing.effective(user.id);
+  if (
+    current.plan.tier > 0 &&
+    current.subscription.planId === plan.id &&
+    current.subscription.cycle === (cycle as BillingCycle)
+  ) {
+    res.status(400).json({ error: "You're already on this plan." });
+    return;
+  }
+
+  // Prorated credit for unused time is computed server-side (authoritative — the
+  // client cannot influence it). An in-cycle switch pays only the difference.
+  const { creditINR } = await billing.prorationCredit(user.id);
+  const payable = Math.max(0, pricing.price - creditINR);
+
+  // Credit fully covers the new plan → activate immediately via the fulfillment
+  // path (no Cashfree order needed). The frontend skips the payment modal.
+  if (payable === 0) {
+    await billing.activateSubscription(user.id, plan, cycle as BillingCycle);
+    res.json({ activated: true, planId: plan.id, cycle });
+    return;
+  }
+
   if (!cfg.cashfreeAppId || !cfg.cashfreeSecretKey) {
     res.status(503).json({ error: 'Payments are not configured on this server.' });
     return;
   }
-  const user = req.user!;
   const orderId = newOrderId();
   const returnUrl = `${cfg.appBaseUrl}/billing/return?order_id={order_id}`;
   const order = await createOrder(
     { appId: cfg.cashfreeAppId, secretKey: cfg.cashfreeSecretKey, baseUrl: cfg.cashfreeBaseUrl },
     {
       orderId,
-      amountINR: pricing.price,
+      amountINR: payable,
       customerId: user.id,
       customerEmail: user.email,
       customerPhone: user.phone || '9999999999',
@@ -618,7 +649,8 @@ app.post('/api/billing/checkout', guard(async (req: Request, res: Response) => {
     userId: user.id,
     planId: plan.id,
     cycle: cycle as BillingCycle,
-    amountINR: pricing.price,
+    amountINR: payable,
+    creditApplied: creditINR,
     paymentSessionId: order.payment_session_id,
   });
   res.json({ payment_session_id: order.payment_session_id, order_id: orderId, mode: cfg.cashfreeEnv });
@@ -655,6 +687,24 @@ app.get('/api/billing/order/:orderId', guard(async (req: Request, res: Response)
     }
   }
   res.json({ status: order.status, planId: order.planId, activated: false });
+}));
+
+app.post('/api/billing/cancel', guard(async (req: Request, res: Response) => {
+  // User-initiated cancel: immediate downgrade to free. Remaining time is
+  // forfeited and no refund is issued (Cashfree orders are one-time — there is
+  // nothing to reverse). Free and lifetime plans have nothing to cancel.
+  const user = req.user!;
+  const { plan, subscription } = await billing.effective(user.id);
+  if (plan.tier === 0) {
+    res.status(400).json({ error: "You're on the Free plan — there's nothing to cancel." });
+    return;
+  }
+  if (subscription.cycle === 'lifetime' || plan.tier >= 3) {
+    res.status(400).json({ error: 'Lifetime plans are permanent and cannot be cancelled.' });
+    return;
+  }
+  await billing.revoke(user.id);
+  res.json({ ok: true });
 }));
 
 // Return page (HTML) after Cashfree redirects back.
