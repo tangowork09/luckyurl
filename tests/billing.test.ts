@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ADMIN_PLAN,
   BillingService,
   FREE_LIFETIME_SCANS,
   FREE_PLAN_ID,
@@ -263,6 +264,39 @@ describe('lifetime purchase never expires', () => {
     const usage = usageFor(eff.plan, eff.subscription);
     expect(usage.unlimited).toBe(true);
     expect(usage.scansRemaining).toBeNull();
+  });
+});
+
+describe('ADMIN_PLAN (virtual admin-role bypass)', () => {
+  it('is maxed out and shaped like a top-tier plan', () => {
+    expect(ADMIN_PLAN.id).toBe('admin');
+    expect(ADMIN_PLAN.tier).toBe(3);
+    expect(ADMIN_PLAN.scansPerPeriod).toBe(UNLIMITED_SCANS);
+    expect(ADMIN_PLAN.maxRadiusMeters).toBe(50000);
+    expect(ADMIN_PLAN.maxBusinesses).toBe(2000);
+    expect(ADMIN_PLAN.psiAllowed).toBe(true);
+    expect(ADMIN_PLAN.aiFeatures).toBe('full');
+    expect(ADMIN_PLAN.prioritySupport).toBe(true);
+    expect(ADMIN_PLAN.historyDays).toBe(3650);
+    expect(ADMIN_PLAN.pricing).toEqual({});
+    expect(ADMIN_PLAN.active).toBe(true);
+  });
+
+  it('yields unlimited usage (never runs out of scans)', () => {
+    const sub: Subscription = {
+      id: 's', userId: 'admin-user', planId: 'admin', status: 'active',
+      startedAt: new Date().toISOString(), periodStart: new Date().toISOString(),
+      expiresAt: null, scansUsed: 999999, freeScansUsed: 0,
+    };
+    const usage = usageFor(ADMIN_PLAN, sub);
+    expect(usage.unlimited).toBe(true);
+    expect(usage.scansRemaining).toBeNull();
+  });
+
+  it('is not persisted to the plans store', async () => {
+    const b = await fresh();
+    expect((await b.allPlans()).map((p) => p.id)).not.toContain('admin');
+    expect(await b.getPlan('admin')).toBeUndefined();
   });
 });
 

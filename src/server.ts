@@ -26,7 +26,7 @@ import {
 } from './auth';
 import { isDisposableEmailDomain } from './disposable-domains';
 import { isWithinRetention, planHistoryDays } from './retention';
-import { BillingService, BILLING_CYCLES, CYCLE_PERIOD_DAYS, usageFor, type AiFeatureLevel, type BillingCycle, type CyclePricing, type Plan } from './billing';
+import { BillingService, BILLING_CYCLES, CYCLE_PERIOD_DAYS, usageFor, ADMIN_PLAN, type AiFeatureLevel, type BillingCycle, type CyclePricing, type Plan } from './billing';
 import { CATEGORY_GROUPS } from './categories';
 import { createOrder, fetchOrder, newOrderId, verifyWebhookSignature } from './cashfree';
 import { loadConfig } from './config';
@@ -179,6 +179,37 @@ function clearSession(res: Response): void {
 }
 
 async function meSummary(userId: string, email: string, role: string) {
+  // Admin role bypasses all plan gating: report the virtual ADMIN_PLAN and a
+  // synthetic active/lifetime/unlimited subscription (never touches the store).
+  if (role === 'admin') {
+    const plan = ADMIN_PLAN;
+    return {
+      id: userId,
+      email,
+      role,
+      plan: {
+        id: plan.id,
+        name: plan.name,
+        tier: plan.tier,
+        scansPerPeriod: plan.scansPerPeriod,
+        maxRadiusMeters: plan.maxRadiusMeters,
+        maxBusinesses: plan.maxBusinesses,
+        psiAllowed: plan.psiAllowed,
+        aiFeatures: plan.aiFeatures,
+        prioritySupport: plan.prioritySupport,
+        historyDays: planHistoryDays(plan),
+      },
+      subscription: {
+        status: 'active',
+        planId: 'admin',
+        cycle: 'lifetime',
+        unlimited: true,
+        scansUsed: 0,
+        scansRemaining: null,
+        expiresAt: null,
+      },
+    };
+  }
   const { plan, subscription } = await billing.effective(userId);
   const usage = usageFor(plan, subscription);
   return {
@@ -335,7 +366,8 @@ app.get('/api/categories', (_req: Request, res: Response) => {
 app.get('/api/leads', guard(async (req: Request, res: Response) => {
   // Per-plan history retention: hide (never delete) scan dirs older than the
   // plan's window. historyDays===0 (free) locks history entirely.
-  const { plan } = await billing.effective(req.user!.id);
+  // Admin bypasses gating: full history via ADMIN_PLAN.
+  const plan = req.user!.role === 'admin' ? ADMIN_PLAN : (await billing.effective(req.user!.id)).plan;
   const historyDays = planHistoryDays(plan);
   const retentionLocked = historyDays === 0;
   if (retentionLocked) {
@@ -530,18 +562,24 @@ app.post('/api/scan', async (req: Request, res: Response) => {
     // Plan enforcement: quota (402), then clamp radius/businesses/PSI to plan.
     // consumeScan is atomic per user, so the lock + this check both prevent
     // over-consumption under concurrency.
-    let consume;
-    try {
-      consume = await billing.consumeScan(user.id);
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'billing error' });
-      return;
+    // Admin bypasses gating: no quota consumed, clamps use ADMIN_PLAN.
+    let plan: Plan;
+    if (user.role === 'admin') {
+      plan = ADMIN_PLAN;
+    } else {
+      let consume;
+      try {
+        consume = await billing.consumeScan(user.id);
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : 'billing error' });
+        return;
+      }
+      if (!consume.ok) {
+        res.status(402).json({ error: consume.reason, planId: consume.plan.id, upgrade: true });
+        return;
+      }
+      plan = consume.plan;
     }
-    if (!consume.ok) {
-      res.status(402).json({ error: consume.reason, planId: consume.plan.id, upgrade: true });
-      return;
-    }
-    const plan = consume.plan;
     scanReq.area.radiusMeters = Math.min(scanReq.area.radiusMeters, plan.maxRadiusMeters);
     scanReq.maxBusinesses = Math.min(scanReq.maxBusinesses ?? plan.maxBusinesses, plan.maxBusinesses);
     if (!plan.psiAllowed) scanReq.psi = false;
@@ -587,9 +625,12 @@ app.get('/api/billing/plans', guard(async (req: Request, res: Response) => {
   const plans = await billing.activePlans();
   const current = await billing.effective(req.user!.id);
   const { creditINR } = await billing.prorationCredit(req.user!.id);
+  // Admin bypasses gating: report ADMIN_PLAN as the current plan. 'admin' is
+  // never in `plans`, so no card is marked current/buyable; sub stays as stored.
+  const currentPlan = req.user!.role === 'admin' ? ADMIN_PLAN : current.plan;
   res.json({
     plans,
-    current: { plan: current.plan, subscription: current.subscription, creditINR },
+    current: { plan: currentPlan, subscription: current.subscription, creditINR },
     billingEnabled: Boolean(cfg.cashfreeAppId && cfg.cashfreeSecretKey),
   });
 }));

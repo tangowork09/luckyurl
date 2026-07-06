@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Plan } from '../src/billing';
+import { ADMIN_PLAN, type Plan } from '../src/billing';
 import { isWithinRetention, planHistoryDays, scanDirDate } from '../src/retention';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -45,6 +45,9 @@ describe('planHistoryDays', () => {
     expect(planHistoryDays({ ...legacy, tier: 1 })).toBe(2);
     expect(planHistoryDays({ ...legacy, tier: 2 })).toBe(30);
     expect(planHistoryDays({ ...legacy, tier: 3 })).toBe(3650);
+  });
+  it('gives the admin bypass plan full history', () => {
+    expect(planHistoryDays(ADMIN_PLAN)).toBe(3650);
   });
 });
 

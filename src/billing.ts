@@ -108,6 +108,27 @@ export const FREE_LIFETIME_SCANS = 2;
 /** scansPerPeriod at or above this is surfaced as "unlimited" (lifetime tier). */
 export const UNLIMITED_SCANS = 100000;
 
+/**
+ * Virtual plan used to bypass ALL plan gating for the admin role. Never
+ * persisted to the plans store — resolved in-memory whenever role==='admin',
+ * so it never appears in allPlans()/activePlans() and is never buyable.
+ * Everything is maxed out: unlimited scans, top tier, full AI, full history.
+ */
+export const ADMIN_PLAN: Plan = {
+  id: 'admin',
+  name: 'Admin',
+  tier: 3,
+  scansPerPeriod: UNLIMITED_SCANS,
+  maxRadiusMeters: 50000,
+  maxBusinesses: 2000,
+  psiAllowed: true,
+  aiFeatures: 'full',
+  prioritySupport: true,
+  historyDays: 3650,
+  pricing: {},
+  active: true,
+};
+
 const SEED_PLANS: Plan[] = [
   {
     id: 'free',
