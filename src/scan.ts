@@ -21,7 +21,7 @@ import type {
   WebsiteAudit,
 } from './types';
 
-const DEFAULT_AUDIT_CONCURRENCY = 5;
+const DEFAULT_AUDIT_CONCURRENCY = 10;
 const DRAFT_TOP_N = 10;
 
 export interface ScanOptions {

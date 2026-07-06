@@ -34,6 +34,7 @@ const RETRY_BASE_MS = 500;
 const POLITENESS_DELAY_MS = 100;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_TYPES_PER_BATCH = 8;
+const SEARCH_CONCURRENCY = 6;
 
 interface RawPlace {
   id?: string;
@@ -186,15 +187,36 @@ export async function searchBusinesses(
   const batches = resolveTypeBatches(req.categories);
   const unique = new Map<string, Business>();
 
+  // Flatten every (cell, type-batch) pair into one task list, then drain it
+  // with a fixed pool of workers so requests overlap instead of running back
+  // to back. searchNearbyBatch keeps its own retry/backoff; the politeness
+  // sleep stays per-request inside each worker.
+  const apiKey = cfg.googleApiKey;
+  const tasks: { ci: number; types: string[] }[] = [];
+  const pendingPerCell = new Array<number>(cells.length).fill(0);
+  for (let ci = 0; ci < cells.length; ci++) {
+    for (const types of batches) {
+      tasks.push({ ci, types });
+      pendingPerCell[ci]++;
+    }
+  }
+
   let attempted = 0;
   let failed = 0;
   let lastError = '';
+  let nextTask = 0;
+  let completedCells = 0;
 
-  for (let ci = 0; ci < cells.length && unique.size < max; ci++) {
-    for (const types of batches) {
-      if (unique.size >= max) break;
+  const worker = async () => {
+    for (;;) {
+      // Stop early once we have enough; in-flight requests may overshoot slightly.
+      if (unique.size >= max) return;
+      const i = nextTask++;
+      if (i >= tasks.length) return;
+      const { ci, types } = tasks[i];
+
       attempted++;
-      const result = await searchNearbyBatch(cfg.googleApiKey, cells[ci], types);
+      const result = await searchNearbyBatch(apiKey, cells[ci], types);
       if (result.ok) {
         for (const raw of result.places) {
           const business = toBusiness(raw);
@@ -205,14 +227,24 @@ export async function searchBusinesses(
         lastError = result.error;
       }
       await sleep(POLITENESS_DELAY_MS);
+
+      // Emit progress as each cell finishes its last batch; cell counter is
+      // monotonic (order of completion), independent of grid index.
+      if (--pendingPerCell[ci] === 0) {
+        completedCells++;
+        onProgress?.({
+          type: 'search',
+          found: Math.min(unique.size, max),
+          cell: completedCells,
+          cells: cells.length,
+        });
+      }
     }
-    onProgress?.({
-      type: 'search',
-      found: Math.min(unique.size, max),
-      cell: ci + 1,
-      cells: cells.length,
-    });
-  }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(SEARCH_CONCURRENCY, tasks.length) }, worker),
+  );
 
   if (attempted > 0 && failed === attempted) {
     throw new Error(
