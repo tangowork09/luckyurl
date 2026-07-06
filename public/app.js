@@ -1216,6 +1216,8 @@
 
     if (order && (order.activated === true || order.status === 'PAID')) {
       await refreshMe();
+      // refreshMe must complete first so state.me.plan is fresh before history re-renders
+      loadHistory();
       showResult('success', { planName });
     } else if (cfError) {
       showResult('failure', {
