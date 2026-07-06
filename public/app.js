@@ -363,7 +363,11 @@
 
   function updateScanButton() {
     scanBtn.disabled = state.running || !state.center;
-    scanBtn.textContent = state.running ? 'Scanning…' : 'Scan';
+    // Route the label through the shader handle when enhanced, else set text
+    // directly — otherwise textContent would wipe the shader spans.
+    const scanTxt = state.running ? 'Scanning…' : 'Scan';
+    if (scanBtn._lfLiquid) scanBtn._lfLiquid.setLabel(scanTxt);
+    else scanBtn.textContent = scanTxt;
     scanBtn.classList.toggle('running', state.running);
     cancelBtn.hidden = !state.running;
     $('scan-hint').hidden = !!state.center || state.running;
@@ -872,6 +876,9 @@
     const cycleTag =
       sub.cycle && sub.cycle !== 'lifetime' ? `<span class="acct-cycle">${esc(CYCLE_LABEL[sub.cycle] || sub.cycle)}</span>` : '';
     const priorityTag = plan.prioritySupport ? `<span class="acct-priority">Priority support</span>` : '';
+    // Free the GL context from the previous Upgrade button before innerHTML
+    // blows the node away (renderAccountBar re-runs on refreshMe).
+    if (window.LFLiquid) accountBar.querySelector('.acct-upgrade')?._lfLiquid?.destroy();
     accountBar.hidden = false;
     accountBar.innerHTML =
       `<span class="acct-email" title="${esc(me.email)}">${esc(me.email)}</span>` +
@@ -884,7 +891,10 @@
       (isLifetime ? '' : `<button type="button" class="acct-upgrade">Upgrade</button>`) +
       `<button type="button" class="acct-logout">Log out</button>`;
     const up = accountBar.querySelector('.acct-upgrade');
-    if (up) up.addEventListener('click', () => openBillingModal());
+    if (up) {
+      up.addEventListener('click', () => openBillingModal());
+      if (window.LFLiquid) LFLiquid.enhanceButton(up, { variant: 'indigo' });
+    }
     accountBar.querySelector('.acct-logout').addEventListener('click', logout);
   }
 
@@ -916,6 +926,8 @@
   }
 
   function closeModal() {
+    // Free any live shader contexts from plan-buy buttons before discarding.
+    if (window.LFLiquid) modalRoot.querySelectorAll('.plan-buy').forEach((b) => b._lfLiquid?.destroy());
     modalRoot.innerHTML = '';
   }
 
@@ -998,11 +1010,11 @@
     else if (!billingEnabled) action = `<button disabled title="Payments not configured">Unavailable</button>`;
     else {
       const label = cycle === 'lifetime' ? 'Get Lifetime' : `Upgrade — ₹${fmtINR(pricing.price)}`;
-      action = `<button class="plan-buy" data-id="${esc(p.id)}" data-cycle="${esc(cycle)}" data-name="${esc(p.name)}">${label}</button>`;
+      action = `<button class="plan-buy" data-id="${esc(p.id)}" data-cycle="${esc(cycle)}" data-tier="${esc(p.tier)}" data-name="${esc(p.name)}">${label}</button>`;
     }
 
     const cls =
-      `plan-card` +
+      `plan-card glass-specular` +
       (isCurrent ? ' current' : '') +
       (p.badge === 'popular' ? ' popular' : '') +
       (p.badge === 'best-value' ? ' best' : '');
@@ -1018,19 +1030,28 @@
   }
 
   function renderPlanGrid(grid, data, mode) {
+    // The cycle toggle re-renders this grid — free the previous buttons' GL
+    // contexts before innerHTML discards them (never leak on toggle).
+    if (window.LFLiquid) grid.querySelectorAll('.plan-buy').forEach((b) => b._lfLiquid?.destroy());
     const currentId = data.current?.plan?.id;
     grid.innerHTML = (data.plans || [])
       .map((p) => planCardHtml(p, mode, currentId, data.billingEnabled))
       .join('');
     grid.querySelectorAll('.plan-buy').forEach((btn) => {
       btn.addEventListener('click', () => checkout(btn.dataset.id, btn.dataset.cycle, btn));
+      if (window.LFLiquid) {
+        const tier = Number(btn.dataset.tier);
+        // lifetime → gold, pro (tier 2) → indigo, starter/other → teal
+        const variant = btn.dataset.cycle === 'lifetime' || tier >= 3 ? 'gold' : tier === 2 ? 'indigo' : 'teal';
+        LFLiquid.enhanceButton(btn, { variant });
+      }
     });
   }
 
   async function openBillingModal(promptMsg) {
     let cycleMode = 'monthly';
     modalRoot.innerHTML =
-      `<div class="modal-backdrop"><div class="modal-card">` +
+      `<div class="modal-backdrop"><div class="modal-card glass glass-specular glass-refract"><span class="refract-edge"></span>` +
       `<div class="modal-head"><h2>Choose your plan</h2><button type="button" class="modal-close" aria-label="close">×</button></div>` +
       (promptMsg
         ? `<p class="modal-sub">${esc(promptMsg)}</p>`
@@ -1073,6 +1094,8 @@
   function setCardBody(html) {
     const card = modalRoot.querySelector('.modal-card');
     if (!card) return null;
+    // Swapping the card body removes the plan grid — free its shader contexts.
+    if (window.LFLiquid) card.querySelectorAll('.plan-buy').forEach((b) => b._lfLiquid?.destroy());
     card.innerHTML = html;
     return card;
   }
@@ -1224,32 +1247,50 @@
   // A radial highlight tracks the cursor across primary glass surfaces. Throttled
   // via rAF; fully disabled under prefers-reduced-motion.
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  // Pointer-reactive specular that FOLLOWS the cursor with a trailing lerp — the
+  // highlight eases toward the pointer (factor 0.18) rather than snapping, so glass
+  // feels alive. Global delegation covers dynamically-added surfaces (modal, plan
+  // cards). Fully disabled under prefers-reduced-motion.
   function initSpecular() {
     if (reduceMotion.matches) return;
-    const surfaces = document.querySelectorAll('.glass-specular');
-    let queued = false;
-    let target = null;
-    let px = 0;
-    let py = 0;
-    const paint = () => {
-      queued = false;
+    let target = null; // current lit surface
+    let tx = 0, ty = 0; // target highlight pos (px, surface-local)
+    let cx = 0, cy = 0; // current (lerped) pos
+    let raf = 0;
+    const LERP = 0.18;
+    const loop = () => {
+      cx += (tx - cx) * LERP;
+      cy += (ty - cy) * LERP;
       if (target) {
-        target.style.setProperty('--mx', `${px}px`);
-        target.style.setProperty('--my', `${py}px`);
+        target.style.setProperty('--mx', `${cx}px`);
+        target.style.setProperty('--my', `${cy}px`);
+      }
+      if (Math.abs(tx - cx) > 0.4 || Math.abs(ty - cy) > 0.4) {
+        raf = requestAnimationFrame(loop);
+      } else {
+        raf = 0;
       }
     };
-    surfaces.forEach((el) => {
-      el.addEventListener('pointermove', (e) => {
-        const rect = el.getBoundingClientRect();
-        target = el;
-        px = e.clientX - rect.left;
-        py = e.clientY - rect.top;
-        if (!queued) {
-          queued = true;
-          requestAnimationFrame(paint);
+    document.addEventListener(
+      'pointermove',
+      (e) => {
+        const el = e.target && e.target.closest && e.target.closest('.glass-specular');
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        if (el !== target) {
+          // Re-home the lerp origin on the new surface so it doesn't streak across.
+          if (target) target.classList.remove('lit');
+          target = el;
+          cx = e.clientX - r.left;
+          cy = e.clientY - r.top;
+          el.classList.add('lit');
         }
-      });
-    });
+        tx = e.clientX - r.left;
+        ty = e.clientY - r.top;
+        if (!raf) raf = requestAnimationFrame(loop);
+      },
+      { passive: true }
+    );
   }
 
   // ---------------------------------------------------------------- mobile bottom sheet
@@ -1261,6 +1302,20 @@
   }
 
   // ---------------------------------------------------------------- boot / auth gate
+  // Liquid-metal shader chrome (progressive enhancement; every call no-ops
+  // gracefully without WebGL2). The boot-loader background is torn down once the
+  // app is revealed so it never holds a live GL context behind the map.
+  let bootBg = null;
+  if (window.LFLiquid) {
+    const bgHost = $('boot-shader-bg');
+    if (bgHost) {
+      bootBg = LFLiquid.mountBackground(bgHost, {
+        colors: ['#062f2b', '#0c3350', '#141b52', '#04070c'], speed: 0.32,
+      });
+    }
+    LFLiquid.enhanceButton(scanBtn, { variant: 'teal' });
+  }
+
   function revealApp() {
     const loader = $('boot-loader');
     const shell = $('app-shell');
@@ -1268,7 +1323,11 @@
     shell.setAttribute('aria-hidden', 'false');
     if (loader) {
       loader.classList.add('hide');
-      setTimeout(() => { loader.hidden = true; }, 650);
+      setTimeout(() => {
+        loader.hidden = true;
+        // Free the boot-loader shader GL context now the loader is gone.
+        if (bootBg) { bootBg.destroy(); bootBg = null; }
+      }, 650);
     }
     // Map was created behind the (opaque) loader — resize now it's visible.
     requestAnimationFrame(() => map.invalidateSize());

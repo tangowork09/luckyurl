@@ -81,11 +81,11 @@ const CONTENT_SECURITY_POLICY = [
   "object-src 'none'",
   "frame-ancestors 'none'",
   "form-action 'self' https://*.cashfree.com",
-  "script-src 'self' 'unsafe-inline' https://unpkg.com https://*.cashfree.com https://cdnjs.cloudflare.com",
+  "script-src 'self' 'unsafe-inline' https://unpkg.com https://*.cashfree.com https://cdnjs.cloudflare.com https://esm.sh",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: https:", // map tiles (CARTO/OSM), business favicons, PSI screenshots
-  "connect-src 'self' https://nominatim.openstreetmap.org https://*.cashfree.com",
+  "connect-src 'self' https://nominatim.openstreetmap.org https://*.cashfree.com https://esm.sh", // esm.sh = @paper-design/shaders ESM + its submodule imports
   'frame-src https://*.cashfree.com', // Cashfree checkout modal spans sdk/payments/sandbox subdomains
 ].join('; ');
 

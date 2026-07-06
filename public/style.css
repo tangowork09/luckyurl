@@ -70,6 +70,21 @@
 
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);       /* expo-ish out */
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  /* real underdamped springs (generated, 44/40 pt) — the "smooth iPhone" motion */
+  --ease-spring: linear(0, 0.0201, 0.0732, 0.1498, 0.2416, 0.3416, 0.444, 0.5444, 0.6393, 0.7265, 0.8042, 0.8717, 0.9286, 0.9753, 1.0123, 1.0404, 1.0605, 1.0736, 1.081, 1.0835, 1.0823, 1.0781, 1.0719, 1.0644, 1.0561, 1.0476, 1.0391, 1.0311, 1.0238, 1.0172, 1.0114, 1.0065, 1.0025, 0.9993, 0.9969, 0.9951, 0.994, 0.9933, 0.993, 0.9931, 0.9934, 0.9939, 0.9945, 1);
+  --ease-spring-soft: linear(0, 0.0214, 0.0767, 0.1547, 0.2459, 0.3432, 0.441, 0.5351, 0.6228, 0.7021, 0.7722, 0.8327, 0.8836, 0.9256, 0.9593, 0.9855, 1.0053, 1.0195, 1.0291, 1.035, 1.0378, 1.0384, 1.0372, 1.0348, 1.0317, 1.0281, 1.0244, 1.0206, 1.0171, 1.0138, 1.0108, 1.0082, 1.0059, 1.0041, 1.0025, 1.0013, 1.0004, 0.9997, 0.9992, 1);
+
+  /* ---- liquid-glass material controls (dark) ---- */
+  --disp-scale: 15;                       /* SVG feDisplacementMap strength (Chromium only) */
+  --rim-hi: rgba(255, 255, 255, 0.5);     /* specular top rim light */
+  --rim-hi-2: rgba(255, 255, 255, 0.16);  /* faint lower sheen */
+  --rim-glow: rgba(180, 230, 255, 0.1);   /* soft bottom bounce */
+  --hairline: rgba(255, 255, 255, 0.42);  /* inset top hairline */
+  --hairline-lo: rgba(0, 0, 0, 0.35);     /* inset bottom shade */
+  --chroma-r: rgba(255, 86, 116, 0.4);    /* chromatic fringe — red, left  */
+  --chroma-c: rgba(54, 226, 255, 0.36);   /* chromatic fringe — cyan, right */
+  --shadow-lift: 0 22px 70px rgba(0, 0, 0, 0.34), 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 
 :root[data-theme='light'] {
@@ -116,6 +131,17 @@
   --shadow-contact: 0 1px 2px rgba(15, 35, 55, 0.14);
   --shadow-ambient: 0 22px 50px -24px rgba(20, 45, 70, 0.4);
   --shadow-rim: inset 1px 1px 0 var(--rim-light), inset -1px -1px 0 var(--rim-dark);
+
+  /* ---- liquid-glass material controls (light) ---- */
+  --disp-scale: 12;
+  --rim-hi: rgba(255, 255, 255, 0.95);
+  --rim-hi-2: rgba(255, 255, 255, 0.42);
+  --rim-glow: rgba(255, 255, 255, 0.55);
+  --hairline: rgba(255, 255, 255, 0.9);
+  --hairline-lo: rgba(15, 35, 55, 0.1);
+  --chroma-r: rgba(255, 86, 116, 0.28);
+  --chroma-c: rgba(20, 160, 200, 0.26);
+  --shadow-lift: 0 22px 60px rgba(20, 45, 70, 0.16), 0 5px 16px rgba(20, 45, 70, 0.12);
 }
 
 /* ------------------------------------------------------------------- reset */
@@ -168,71 +194,111 @@ code {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--accent-line); background-clip: padding-box; }
 
-/* ------------------------------------------------------- glass primitives */
+/* =========================================================================
+ * REAL liquid glass — refraction (SVG lens) + specular rim + chromatic fringe
+ * The lens: a Chromium-only SVG displacement filter (#lf-glass) BENDS the
+ * backdrop at the rounded rim. Non-Chromium (Safari/FF) falls back to a strong
+ * blur that still reads premium via the specular + shadow + chromatic layers.
+ * ======================================================================== */
 .glass {
   position: relative;
+  isolation: isolate;            /* contain the screen-blend rim; no leak to map/siblings */
   background: var(--glass);
   -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat)) brightness(var(--bright));
   backdrop-filter: blur(var(--blur)) saturate(var(--sat)) brightness(var(--bright));
   border: 1px solid var(--glass-edge);
   border-radius: 20px;
-  box-shadow: var(--shadow-rim), var(--shadow-contact), var(--shadow-ambient);
+  /* layered light: soft lift + contact + top hairline + bottom shade + chromatic rim */
+  box-shadow:
+    var(--shadow-lift),
+    var(--shadow-contact),
+    inset 0 1px 0 var(--hairline),
+    inset 0 -1px 0 var(--hairline-lo),
+    inset 1px 0 0 var(--chroma-r),
+    inset -1px 0 0 var(--chroma-c);
 }
-/* top sheen — a soft light gradient reading as a curved lens surface */
+
+/* Chromium with SVG-ref backdrop support: prepend the displacement lens and
+   ease off the blur so the edge-bending actually reads as a curved lens. */
+.has-refraction .glass {
+  backdrop-filter: url(#lf-glass) blur(calc(var(--blur) * 0.62)) saturate(var(--sat)) brightness(var(--bright));
+}
+
+/* SPECULAR RIM — layered edge light (mix-blend screen brightens, never obscures).
+   Top rim highlight + curved-lens top sheen + soft bottom bounce. */
 .glass::before {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
+  z-index: 0;
+  mix-blend-mode: screen;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, transparent 24%, transparent 100%);
-  opacity: 0.9;
+    /* top specular rim — fixed band so tall panels don't over-glow */
+    linear-gradient(180deg, var(--rim-hi) 0, var(--rim-hi-2) 2px, transparent 44px),
+    /* soft bottom bounce glow */
+    linear-gradient(0deg, var(--rim-glow) 0, transparent 60px),
+    /* broad curved-lens sheen across the top corner */
+    linear-gradient(150deg, rgba(255, 255, 255, 0.14) 0, transparent 120px);
 }
 
-/* pointer-reactive specular highlight (JS drives --mx/--my in px) */
+/* POINTER-REACTIVE SPECULAR — JS lerps --mx/--my (px). Trails the cursor. */
 .glass-specular::after {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
+  z-index: 1;
+  mix-blend-mode: screen;
   background: radial-gradient(
-    280px circle at var(--mx, 50%) var(--my, -20%),
-    rgba(255, 255, 255, 0.16),
-    transparent 62%
+    240px circle at var(--mx, 50%) var(--my, -30%),
+    rgba(255, 255, 255, 0.22),
+    rgba(255, 255, 255, 0.06) 34%,
+    transparent 60%
   );
   opacity: 0;
-  transition: opacity 0.35s var(--ease-out);
-  z-index: 1;
+  transition: opacity 0.4s var(--ease-out);
 }
-.glass-specular:hover::after { opacity: 1; }
+.glass-specular:hover::after,
+.glass-specular.lit::after { opacity: 1; }
 
-/* edge refraction — faint chromatic fringe for hero surfaces (sparingly) */
-.glass-refract {
-  --fringe: 0.5;
-}
+/* EDGE REFRACTION accent — a brighter chromatic dispersion rim for hero glass.
+   Rides on top of the SVG lens (or stands in for it on the fallback path). */
 .glass-refract > .refract-edge {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  padding: 1px;
+  padding: 1.2px;
   pointer-events: none;
+  z-index: 1;
+  mix-blend-mode: screen;
   background: linear-gradient(
     130deg,
-    rgba(120, 200, 255, 0.55),
-    rgba(140, 255, 220, 0.15) 40%,
-    transparent 55%,
-    rgba(255, 130, 210, 0.4)
+    rgba(120, 200, 255, 0.6),
+    rgba(140, 255, 220, 0.16) 34%,
+    transparent 52%,
+    rgba(255, 130, 210, 0.46) 80%,
+    rgba(255, 86, 116, 0.34)
   );
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  opacity: 0.55;
-  z-index: 1;
+  opacity: 0.7;
 }
-:root[data-theme='light'] .glass-refract > .refract-edge { opacity: 0.4; }
+:root[data-theme='light'] .glass-refract > .refract-edge { opacity: 0.5; }
+
+/* squircle corners where supported (Chrome 139+); plain radius otherwise */
+@supports (corner-shape: squircle) {
+  .glass,
+  .plan-card,
+  .modal-card,
+  .scan-btn,
+  .auth-submit,
+  .theme-toggle { corner-shape: squircle; }
+}
 
 /* text legibility scrim helper */
 .scrim {
@@ -362,7 +428,7 @@ code {
   gap: 14px;
   padding: 9px 12px 9px 16px;
   border-radius: 18px;
-  animation: rise-in 0.6s var(--ease-out) both;
+  animation: rise-in 0.7s var(--ease-spring) both;
 }
 .brand {
   display: flex;
@@ -447,7 +513,7 @@ code {
   display: flex;
   flex-direction: column;
   border-radius: 22px;
-  animation: rise-in 0.7s 0.05s var(--ease-out) both;
+  animation: rise-in 0.8s 0.05s var(--ease-spring) both;
 }
 .rail-scroll {
   overflow-y: auto;
@@ -458,7 +524,7 @@ code {
 }
 
 @keyframes rise-in {
-  from { opacity: 0; transform: translateY(10px); filter: blur(6px); }
+  from { opacity: 0; transform: translateY(16px) scale(0.94); filter: blur(12px); }
   to { opacity: 1; transform: none; filter: none; }
 }
 
@@ -1353,7 +1419,7 @@ input.switch:checked::after { transform: translateX(18px); background: var(--acc
   width: 100%; max-width: 400px;
   padding: 34px 30px;
   border-radius: 24px;
-  animation: rise-in 0.7s var(--ease-out) both;
+  animation: rise-in 0.85s var(--ease-spring) both;
 }
 .auth-card .auth-inner { position: relative; z-index: 2; }
 .auth-brand {
@@ -1426,11 +1492,11 @@ input.switch:checked::after { transform: translateX(18px); background: var(--acc
   max-height: 88vh; overflow-y: auto;
   border-radius: 24px;
   padding: 26px;
-  animation: modal-in 0.4s var(--ease-out) both;
+  animation: modal-in 0.55s var(--ease-spring) both;
 }
 .modal-card > * { position: relative; z-index: 2; }
 @keyframes modal-in {
-  from { opacity: 0; transform: translateY(16px) scale(0.98); filter: blur(6px); }
+  from { opacity: 0; transform: translateY(18px) scale(0.94); filter: blur(12px); }
   to { opacity: 1; transform: none; filter: none; }
 }
 .modal-head { display: flex; align-items: center; margin-bottom: 6px; }
@@ -1680,12 +1746,62 @@ input.switch:checked::after { transform: translateX(18px); background: var(--acc
 }
 .admin-note { color: var(--ink-2); font-size: 13px; margin-top: 8px; }
 
+/* ===================================== liquid press / hover physics (spring) */
+/* Interactive glass squishes on press and lifts on hover on the soft spring —
+   the tactile "smooth iPhone" response. Uses the `scale` property so it composes
+   with any existing translate transforms (e.g. plan-card hover lift). */
+.scan-btn,
+.plan-card,
+.plan-card button,
+.chip,
+.btn-secondary,
+.auth-submit,
+.lottie-btn,
+.upgrade-cta,
+.theme-toggle {
+  transition-property: scale, filter, box-shadow, border-color, background, color, transform;
+  transition-duration: 0.34s;
+  transition-timing-function: var(--ease-spring-soft);
+  will-change: scale;
+}
+.scan-btn:hover:not(:disabled),
+.plan-card button:hover:not(:disabled),
+.auth-submit:hover:not(:disabled),
+.lottie-btn:hover,
+.upgrade-cta:hover { scale: 1.025; }
+.scan-btn:active:not(:disabled),
+.plan-card button:active:not(:disabled),
+.chip:active,
+.btn-secondary:active:not(:disabled),
+.auth-submit:active:not(:disabled),
+.lottie-btn:active,
+.upgrade-cta:active,
+.theme-toggle:active { scale: 0.955; }
+
+/* plan cards: contain the pointer specular blend + spring the hover grow */
+.plan-card { isolation: isolate; }
+.plan-card:hover { scale: 1.03; }
+
+/* result rows: staggered spring entrance (first rows in view) */
+.lead-list .lead-row { animation-timing-function: var(--ease-spring); }
+.lead-list .lead-row:nth-child(1) { animation-delay: 0.02s; }
+.lead-list .lead-row:nth-child(2) { animation-delay: 0.06s; }
+.lead-list .lead-row:nth-child(3) { animation-delay: 0.1s; }
+.lead-list .lead-row:nth-child(4) { animation-delay: 0.14s; }
+.lead-list .lead-row:nth-child(5) { animation-delay: 0.18s; }
+.lead-list .lead-row:nth-child(6) { animation-delay: 0.22s; }
+.lead-list .lead-row:nth-child(7) { animation-delay: 0.26s; }
+.lead-list .lead-row:nth-child(8) { animation-delay: 0.3s; }
+.lead-list .lead-row:nth-child(9) { animation-delay: 0.34s; }
+.lead-list .lead-row:nth-child(10) { animation-delay: 0.38s; }
+
 /* ============================================== reduced motion off-switch */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.05ms !important;
     scroll-behavior: auto !important;
@@ -1694,6 +1810,129 @@ input.switch:checked::after { transform: translateX(18px); background: var(--acc
   .boot-orb .orb-core::after,
   .auth-bg .orb-a,
   .auth-bg .orb-b { animation: none !important; }
+  /* no cursor-tracking highlight, no press/hover scale */
   .glass-specular::after { display: none; }
+  .scan-btn:hover, .plan-card:hover, .plan-card button:hover,
+  .auth-submit:hover, .scan-btn:active, .plan-card button:active { scale: 1 !important; }
   #boot-loader.hide { transition: opacity 0.2s linear; }
+  /* Shader freezes in JS; also kill the click ripple + any lf motion. */
+  .lf-ripple { display: none !important; }
+  .lf-liquid-btn, .lf-liquid-label { transition: none !important; }
 }
+
+/* ==================================================================
+   liquid.js — WebGL liquid-metal shader buttons + shader backgrounds
+   (progressive enhancement; classes applied by /liquid.js)
+   ================================================================== */
+
+/* --- shader button shell -------------------------------------------------
+   `.lf-liquid-btn` is added ON TOP of the button's existing class
+   (.scan-btn / .auth-submit / .acct-upgrade / .plan-buy), so padding, radius,
+   font and sizing all come from that base class — we only make room for the
+   shader layers and hide the base gradient so the metal shows through. */
+.lf-liquid-btn {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: transparent !important;
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(255, 255, 255, 0.06) !important;
+}
+.lf-liquid-btn::after { display: none !important; } /* drop base-class sheen sweep */
+.lf-liquid-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* shader canvas host (behind everything) */
+.lf-liquid-gl {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+}
+.lf-liquid-gl canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  border-radius: inherit;
+}
+
+/* dark depth gradient + inset highlight rim for a glossy metal read */
+.lf-liquid-tint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(12, 22, 20, 0.12), rgba(4, 7, 12, 0.58));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.34);
+  mix-blend-mode: multiply;
+}
+
+/* legible label sits above the shader (≥4.5:1 white on dark metal) */
+.lf-liquid-label {
+  position: relative;
+  z-index: 2;
+  display: inline-block;
+  color: #f5fbff;
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+/* click ripple */
+.lf-ripple {
+  position: absolute;
+  z-index: 3;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0) 70%);
+  transform: scale(0);
+  opacity: 0.5;
+  animation: lf-ripple 0.62s ease-out forwards;
+}
+@keyframes lf-ripple {
+  from { transform: scale(0); opacity: 0.5; }
+  to { transform: scale(4); opacity: 0; }
+}
+
+/* Fallback: WebGL context creation failed AFTER the spans were built — restore
+   an opaque brand background so the light label stays legible. (The pure
+   no-WebGL2 path never adds .lf-liquid-btn, so those buttons keep their
+   original CSS untouched.) */
+.lf-liquid-btn.lf-liquid-fallback {
+  background: linear-gradient(135deg, #123f3a, #05100f) !important;
+}
+.lf-liquid-btn.lf-liquid-fallback .lf-liquid-gl { display: none; }
+
+/* --- full-bleed shader background host ----------------------------------- */
+.lf-shader-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.lf-shader-bg canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+/* when the shader is live, fade the CSS-orb fallback so it doesn't double up */
+.auth-bg:has(.lf-shader-bg.lf-bg-live) .orb-a,
+.auth-bg:has(.lf-shader-bg.lf-bg-live) .orb-b { opacity: 0; }
+/* boot-loader content must ride above its shader bg */
+#boot-loader .lf-shader-bg { z-index: 0; }
+#boot-loader .boot-inner { position: relative; z-index: 1; }
+/* .lf-bg-fallback keeps the existing CSS orb/gradient background visible (no-op) */
