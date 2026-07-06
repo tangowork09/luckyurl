@@ -540,9 +540,12 @@
     }
   }
 
-  function renderResults(result) {
+  // `subdirHint` covers results loaded from a saved leads.json, which is
+  // written before outDir exists on the result — the caller (history browser)
+  // already knows which scan dir it fetched from.
+  function renderResults(result, subdirHint) {
     state.result = result;
-    state.subdir = basename(result.outDir);
+    state.subdir = result.outDir ? basename(result.outDir) : subdirHint || state.subdir;
     state.sortDesc = true;
     applyScanArea(result.area);
 
@@ -575,7 +578,7 @@
 
     const outdirNote = document.createElement('p');
     outdirNote.className = 'outdir';
-    outdirNote.innerHTML = `Saved to <code>${esc(result.outDir)}</code>`;
+    outdirNote.innerHTML = `Saved to <code>${esc(result.outDir || state.subdir)}</code>`;
     $('files').after(outdirNote);
     // Keep only the newest note if re-scanning.
     let sib = outdirNote.nextElementSibling;
@@ -865,7 +868,7 @@
     fetch(`${leadsPrefix()}/${encodeURIComponent(dir)}/leads.json`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('not found'))))
       .then((result) => {
-        renderResults(result);
+        renderResults(result, dir);
         setStatus(`Loaded ${result.leads?.length || 0} leads from ${dir}`, 'ok');
         const c = result.area?.center;
         if (c) map.setView([c.lat, c.lng], 13);
