@@ -57,7 +57,11 @@ function storeFor(userId: string): CrmStore {
   }
   return s;
 }
-const scanRunning = new Map<string, boolean>();
+// Per-user scan lock. Holds the running scan's AbortController so a new
+// request can tell a live scan (reject) from a zombie whose client already
+// disconnected (wait briefly for it to wind down, then take over).
+const scanRunning = new Map<string, AbortController>();
+const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const app = express();
 // Trust EXACTLY ONE proxy hop (Railway's edge). `true` would trust the entire
@@ -489,13 +493,31 @@ function parseScanRequest(body: unknown): ScanRequest | null {
 
 app.post('/api/scan', async (req: Request, res: Response) => {
   const user = req.user!;
-  // Reserve the per-user scan lock SYNCHRONOUSLY — between this get() and set()
-  // there is no await, so two concurrent requests can't both pass the guard.
-  if (scanRunning.get(user.id)) {
+  const existing = scanRunning.get(user.id);
+  if (existing && !existing.signal.aborted) {
+    // A scan with a live client connection — genuinely running.
     res.status(409).json({ error: 'A scan is already running.' });
     return;
   }
-  scanRunning.set(user.id, true);
+  if (existing) {
+    // Zombie: the client disconnected (page refresh) and the old scan is
+    // winding down but may be stuck in a slow audit. Wait for it to release
+    // the lock instead of bouncing the user.
+    const deadline = Date.now() + 15_000;
+    while (scanRunning.has(user.id) && Date.now() < deadline) await sleepMs(250);
+    if (scanRunning.has(user.id)) {
+      res.status(409).json({ error: 'Your previous scan is still shutting down — try again in a few seconds.' });
+      return;
+    }
+  }
+  const abort = new AbortController();
+  // Claim the lock SYNCHRONOUSLY — no await between the has() checks above
+  // resolving and this set(), so two concurrent requests can't both claim.
+  if (scanRunning.has(user.id)) {
+    res.status(409).json({ error: 'A scan is already running.' });
+    return;
+  }
+  scanRunning.set(user.id, abort);
   // Single try/finally guarantees the lock is cleared on EVERY exit path —
   // validation 400, quota 402, billing 500, scan error, or normal stream end.
   try {
@@ -539,7 +561,6 @@ app.post('/api/scan', async (req: Request, res: Response) => {
     });
     res.flushHeaders?.();
 
-    const abort = new AbortController();
     res.on('close', () => abort.abort());
 
     const send = (e: ProgressEvent) => {
@@ -554,7 +575,9 @@ app.post('/api/scan', async (req: Request, res: Response) => {
       res.end();
     }
   } finally {
-    scanRunning.set(user.id, false);
+    // Only release if we still own the lock (a takeover can't happen while we
+    // hold it, but guard against ever deleting a successor's claim).
+    if (scanRunning.get(user.id) === abort) scanRunning.delete(user.id);
   }
 });
 

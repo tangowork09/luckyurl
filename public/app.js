@@ -523,10 +523,28 @@
       .join('');
   }
 
+  // Sync the map's center pin + radius circle (and the slider) to a scan's
+  // area — needed when results arrive without the user having placed the pin
+  // this session (history load, post-refresh) and when the server clamped the
+  // requested radius to the plan's max.
+  function applyScanArea(area) {
+    const c = area?.center;
+    if (!c || typeof c.lat !== 'number' || typeof c.lng !== 'number') return;
+    setCenter(c.lat, c.lng, false);
+    const r = Number(area.radiusMeters);
+    if (Number.isFinite(r) && r > 0) {
+      state.radius = clamp(r, Number(radiusSlider.min), Number(radiusSlider.max));
+      radiusSlider.value = state.radius;
+      radiusLabel.textContent = fmtRadius(state.radius);
+      radiusCircle.setRadius(state.radius);
+    }
+  }
+
   function renderResults(result) {
     state.result = result;
     state.subdir = basename(result.outDir);
     state.sortDesc = true;
+    applyScanArea(result.area);
 
     liveFeed.hidden = true;
     liveFeed.innerHTML = '';
