@@ -1,7 +1,7 @@
 /**
  * Headless scans:
  *   npm run scan -- --lat 12.9758 --lng 77.6045 --radius 2000 \
- *     [--categories food,retail] [--max 300] [--psi] [--out ./leads] [--demo]
+ *     [--categories food,retail] [--max 300] [--psi] [--live-verify] [--out ./leads] [--demo]
  */
 import { resolve } from 'node:path';
 import { loadConfig } from './config';
@@ -39,7 +39,7 @@ function fail(message: string): never {
   console.error(`Error: ${message}`);
   console.error(
     'Usage: npm run scan -- --lat <lat> --lng <lng> [--radius 2000] ' +
-      '[--categories food,retail] [--max 300] [--psi] [--pack 10] [--draft] [--out ./leads] [--demo]',
+      '[--categories food,retail] [--max 300] [--psi] [--live-verify] [--pack 10] [--draft] [--out ./leads] [--demo]',
   );
   process.exit(1);
 }
@@ -57,6 +57,9 @@ function onProgress(e: ProgressEvent): void {
       break;
     case 'search':
       console.log(`   cell ${e.cell}/${e.cells} — ${e.found} businesses found`);
+      break;
+    case 'verify':
+      console.log(`   verify ${e.done}/${e.total} — ${e.current}`);
       break;
     case 'audit':
       console.log(`   audit ${e.done}/${e.total} — ${e.current}`);
@@ -107,6 +110,7 @@ async function main(): Promise<void> {
     categories,
     psi: args.has('psi'),
     draft: args.has('draft'),
+    liveVerify: args.has('live-verify'),
     outDir,
   };
   const max = numArg(args, 'max');

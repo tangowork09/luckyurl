@@ -665,6 +665,10 @@
         setStatus(`Searching… cell ${ev.cell}/${ev.cells} · ${ev.found} found`);
         setProgress('indeterminate');
         break;
+      case 'verify':
+        setStatus(`Live-verifying ${ev.done}/${ev.total} · ${ev.current}`);
+        setProgress(ev.total > 0 ? (ev.done / ev.total) * 100 : 0);
+        break;
       case 'audit':
         setStatus(`Auditing ${ev.done}/${ev.total} · ${ev.current}`);
         setProgress(ev.total > 0 ? (ev.done / ev.total) * 100 : 0);
@@ -711,6 +715,7 @@
       categories: selectedCategoryKeys(),
       maxBusinesses: clamp(Number.isFinite(maxRaw) ? maxRaw : 300, 1, 2000),
       psi: $('psi-toggle').checked,
+      liveVerify: $('live-verify-toggle').checked,
     };
 
     state.running = true;

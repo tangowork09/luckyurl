@@ -517,6 +517,7 @@ function parseScanRequest(body: unknown): ScanRequest | null {
     categories,
     psi: raw.psi === true,
     draft: raw.draft === true,
+    liveVerify: raw.liveVerify === true,
   };
   if (Number.isFinite(maxRaw)) req.maxBusinesses = Math.min(Math.max(Math.floor(maxRaw), 1), 2000);
   if (Number.isFinite(packRaw) && packRaw > 0) req.pack = Math.min(Math.floor(packRaw), 50);
@@ -582,7 +583,13 @@ app.post('/api/scan', async (req: Request, res: Response) => {
     }
     scanReq.area.radiusMeters = Math.min(scanReq.area.radiusMeters, plan.maxRadiusMeters);
     scanReq.maxBusinesses = Math.min(scanReq.maxBusinesses ?? plan.maxBusinesses, plan.maxBusinesses);
+    // psiAllowed doubles as the gate for BOTH deep-audit features: PageSpeed
+    // Insights and live-verify (a separate, unrelated Puppeteer-based
+    // re-check against live Google Maps). Deliberately reused rather than
+    // adding a second plan field — both are "slow, heavier" scan add-ons —
+    // but that means a plan can't currently offer one without the other.
     if (!plan.psiAllowed) scanReq.psi = false;
+    if (!plan.psiAllowed) scanReq.liveVerify = false;
     // AI feature gating: local-model draft generation (draft.ts via `ensemble`)
     // is the only AI surface today. Free (aiFeatures 'none') can't use it.
     // TODO(ai-gating): when richer AI endpoints land (e.g. rewrite/expand a pitch),

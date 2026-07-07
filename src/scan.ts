@@ -6,6 +6,7 @@
 import { auditWebsite } from './audit';
 import { draftWithEnsemble, ensembleAvailable } from './draft';
 import { promptMarkdown, writeLeadFiles } from './markdown';
+import { jitter, launchMapsBrowser, readListing } from './maps-live';
 import { mockAudit } from './mock';
 import { searchBusinesses } from './places';
 import { classifyLead, groupKeyOf, withCompetitorContext } from './score';
@@ -23,6 +24,91 @@ import type {
 
 const DEFAULT_AUDIT_CONCURRENCY = 10;
 const DRAFT_TOP_N = 10;
+const VERIFY_CONCURRENCY = 3;
+// Hard ceiling on live-verify targets per scan. Without this, a plan's
+// maxBusinesses (up to 2000) times readListing's ~1-2s+ real cost at only 3
+// tabs of concurrency turns into a multi-hour foreground wait on a request
+// the user is watching a progress bar for. Truncation is logged, never silent.
+const MAX_LIVE_VERIFY_TARGETS = 150;
+// Data sources whose googleMapsUri actually points at a Google Maps place
+// page. OSM's free path stores an openstreetmap.org URL in that same field
+// (see overpass.ts) — navigating there would just read OSM's own page, not
+// verify anything, so live-verify is skipped rather than fed garbage input.
+const LIVE_VERIFY_SOURCES = new Set(['google', 'apify']);
+
+/**
+ * Re-checks every business against its live Google Maps page (a headless
+ * Chrome pass, not the Places API) and overwrites stale fields in place —
+ * website added/removed, phone changed, or the place closed down. The
+ * Places API result can lag the live page by weeks; this catches that.
+ *
+ * Never throws: a Chromium launch failure (e.g. missing OS deps in a
+ * container) degrades to "skip live-verify" for the caller to handle, same
+ * as every other optional pass in this pipeline — it must not discard an
+ * otherwise-successful search + audit, especially after billing has already
+ * charged the user's scan quota for this request.
+ */
+async function revalidateWithLiveMaps(
+  businesses: Business[],
+  onProgress: ProgressFn | undefined,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const allTargets = businesses.filter((b) => b.googleMapsUri);
+  if (allTargets.length === 0) return;
+  const targets = allTargets.slice(0, MAX_LIVE_VERIFY_TARGETS);
+  if (allTargets.length > targets.length) {
+    onProgress?.({
+      type: 'phase',
+      phase: 'search',
+      message: `Live-verify capped at ${targets.length}/${allTargets.length} businesses (time budget).`,
+    });
+  }
+
+  const browser = await launchMapsBrowser(true);
+  try {
+    let next = 0;
+    let done = 0;
+    const worker = async () => {
+      const page = await browser.newPage();
+      try {
+        for (;;) {
+          if (signal?.aborted) return;
+          const i = next++;
+          if (i >= targets.length) return;
+          const b = targets[i];
+          const live = await readListing(page, b.googleMapsUri);
+          // Only trust the live read when readListing confirmed it actually
+          // landed on a real Maps place page (see isGoogleMapsPlaceUrl) — a
+          // non-null result here means "verified," not "best guess," so
+          // websiteUri can be overwritten unconditionally same as the other
+          // fields: a live page with no site link means no site, full stop.
+          if (live) {
+            b.websiteUri = live.website;
+            if (live.phone) b.phone = live.phone;
+            if (live.address) b.address = live.address;
+            if (live.closed) {
+              b.businessStatus = 'CLOSED_PERMANENTLY';
+            } else if (b.businessStatus && b.businessStatus !== 'OPERATIONAL') {
+              // Cached data said closed; the live page loaded fine with no
+              // closed badge — trust the fresher read and reopen it.
+              b.businessStatus = 'OPERATIONAL';
+            }
+          }
+          done++;
+          onProgress?.({ type: 'verify', done, total: targets.length, current: b.name });
+          await jitter(500); // politeness delay — match places.ts / scrape-maps.ts pacing
+        }
+      } finally {
+        await page.close();
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(VERIFY_CONCURRENCY, targets.length) }, worker),
+    );
+  } finally {
+    await browser.close();
+  }
+}
 
 export interface ScanOptions {
   /** CRM store for cross-scan dedup, suppression and status annotation. */
@@ -131,6 +217,32 @@ export async function runScan(
     onProgress?.({ type: 'phase', phase: 'search', message: 'Searching businesses in the area…' });
     const businesses = await searchBusinesses(cfg, req, onProgress);
     if (signal?.aborted) throw new Error('Scan cancelled.');
+
+    if (req.liveVerify && !cfg.demoMode && LIVE_VERIFY_SOURCES.has(cfg.dataSource)) {
+      onProgress?.({
+        type: 'phase',
+        phase: 'search',
+        message: `Revalidating ${businesses.length} businesses against live Google Maps…`,
+      });
+      try {
+        await revalidateWithLiveMaps(businesses, onProgress, signal);
+      } catch (err) {
+        // A Chromium/infra failure here must not void a search (and billed
+        // scan quota) that already succeeded — fall back to cached data.
+        onProgress?.({
+          type: 'phase',
+          phase: 'search',
+          message: `Live-verify unavailable (${err instanceof Error ? err.message : String(err)}) — continuing with cached data.`,
+        });
+      }
+      if (signal?.aborted) throw new Error('Scan cancelled.');
+    } else if (req.liveVerify && !cfg.demoMode) {
+      onProgress?.({
+        type: 'phase',
+        phase: 'search',
+        message: `Live-verify skipped — the ${cfg.dataSource.toUpperCase()} data source has no Google Maps page to verify against.`,
+      });
+    }
 
     const withSites = businesses.filter((b) => b.websiteUri);
     onProgress?.({

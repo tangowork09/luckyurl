@@ -10,12 +10,14 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "scan": "tsx src/cli.ts",
+    "scrape:maps": "tsx src/scrape-maps.ts",
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "puppeteer": "^25.3.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

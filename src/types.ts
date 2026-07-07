@@ -28,6 +28,13 @@ export interface ScanRequest {
   auditConcurrency?: number;
   /** Run PageSpeed Insights on each website (slow, ~30s/site). Default false. */
   psi?: boolean;
+  /**
+   * Revalidate every found business against its live Google Maps page via a
+   * headless browser before auditing (catches stale Places-cache data: sites
+   * that were removed, phones that changed, places that closed down).
+   * Slow — roughly 1-2s per business. Default false.
+   */
+  liveVerify?: boolean;
   /** Output directory root. Default "./leads". A timestamped subdir is created per scan. */
   outDir?: string;
   /**
@@ -232,6 +239,7 @@ export interface ScanResult {
 export type ProgressEvent =
   | { type: 'phase'; phase: 'search' | 'audit' | 'write'; message: string }
   | { type: 'search'; found: number; cell: number; cells: number }
+  | { type: 'verify'; done: number; total: number; current: string }
   | { type: 'audit'; done: number; total: number; current: string }
   | { type: 'lead'; lead: Lead }
   | { type: 'done'; result: ScanResult }
@@ -425,13 +433,36 @@ export interface CategoryGroup {
  *       "What they need" + "Pitch angles" + suggested opener.
  *     - SUMMARY.md (table sorted by score desc, links to files) + leads.json.
  *
+ * src/maps-live.ts
+ *   export async function launchMapsBrowser(headless?: boolean): Promise<Browser>
+ *     - Queues behind a server-wide concurrent-Chromium cap (this app is one
+ *       process serving every tenant). --no-sandbox (container runs as root).
+ *   export async function readListing(page: Page, url: string): Promise<LiveListing | null>
+ *     - Navigates to a Maps place URL and extracts name/website/phone/address/
+ *       rating/closed. Returns null (never throws) on an unreachable/private
+ *       URL, or when the page landed on isn't actually a Google Maps place
+ *       page (wrong data source's URL, consent wall, anti-abuse redirect) —
+ *       callers must treat non-null as verified ground truth.
+ *   export async function collectListingUrls(page: Page, max: number): Promise<string[]>
+ *   export async function acceptConsentIfPresent(page: Page): Promise<void>
+ *   export const jitter: (baseMs: number) => Promise<void>
+ *     - Shared by scan.ts (live-verify) and scrape-maps.ts (standalone scrape).
+ *
  * src/scan.ts
  *   export async function runScan(
  *     cfg: AppConfig, req: ScanRequest, onProgress?: ProgressFn
  *   ): Promise<ScanResult>
- *     - Orchestrates: searchBusinesses -> audit (concurrency pool,
- *       mockAudit when cfg.demoMode) -> classifyLead -> writeLeadFiles.
+ *     - Orchestrates: searchBusinesses -> optional live-verify (req.liveVerify,
+ *       google/apify sources only, maps-live.ts, capped at 150 businesses,
+ *       degrades to a no-op on failure rather than aborting the scan) ->
+ *       audit (concurrency pool, mockAudit when cfg.demoMode) -> classifyLead
+ *       -> writeLeadFiles.
  *     - Emits every ProgressEvent type, ends with 'done'.
+ *
+ * src/scrape-maps.ts
+ *   - Standalone CLI (npm run scrape:maps), independent of runScan/the Places
+ *     API entirely: drives maps-live.ts directly against a live Maps search
+ *     to list an area's businesses and flag which have no website right now.
  *
  * src/server.ts
  *   - Express on cfg.port. Serves ./public static and ./leads static.
@@ -444,7 +475,7 @@ export interface CategoryGroup {
  *
  * src/cli.ts
  *   - tsx src/cli.ts --lat 12.97 --lng 77.60 --radius 2000
- *       [--categories food,retail] [--max 300] [--psi] [--out ./leads]
+ *       [--categories food,retail] [--max 300] [--psi] [--live-verify] [--out ./leads]
  *   - No --lat/--lng in demo mode => default center 12.9758,77.6045.
  *   - Prints progress lines and a final summary table to stdout.
  * ============================================================ */
